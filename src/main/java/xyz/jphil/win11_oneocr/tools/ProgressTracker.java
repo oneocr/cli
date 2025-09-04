@@ -65,7 +65,14 @@ public class ProgressTracker {
     
     public ProgressTracker inc() { 
         int current = completed.incrementAndGet();
-        show();
+        
+        // In folder mode, trigger coordinated dual progress rendering
+        if (DualProgressRenderer.isFolderModeActive()) {
+            DualProgressRenderer.renderAll();
+        } else {
+            show();
+        }
+        
         return this;
     }
     
@@ -125,12 +132,6 @@ public class ProgressTracker {
     
     private void show() {
         if (total == 0 || paused || !showProgress) return;
-        
-        // In folder mode, defer to DualProgressRenderer for coordinated display
-        if (DualProgressRenderer.isFolderModeActive()) {
-            // DualProgressRenderer will handle the rendering
-            return;
-        }
         
         var stats = calcStats();
         int currentCompleted = completed.get();
@@ -227,5 +228,17 @@ public class ProgressTracker {
         return h > 0 ? "%dh %02dm".formatted(h, m) :
                m > 0 ? "%dm %02ds".formatted(m, s) :
                        "%ds".formatted(s);
+    }
+    
+    @Override
+    public String toString() {
+        if (total == 0) return String.format("[%s] 0.0%%", "░".repeat(25));
+        
+        var stats = calcStats();
+        int currentCompleted = completed.get();
+        var progressBar = bar(stats.pct(), 25);
+        
+        return String.format("%s %.1f%% (%d/%d) %s %s", 
+            progressBar, stats.pct(), currentCompleted, total, stats.eta(), stats.rate());
     }
 }

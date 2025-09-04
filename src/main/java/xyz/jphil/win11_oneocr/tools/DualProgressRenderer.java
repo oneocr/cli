@@ -66,17 +66,10 @@ public class DualProgressRenderer {
     private static void renderProgressLine(ProgressTracker tracker) {
         if (tracker.total() == 0 || !tracker.showProgress()) return;
         
-        var stats = tracker.calcStats();
-        var currentCompleted = tracker.completed().get();
-        var bar = progressBar(currentCompleted, tracker.total());
-        
-        if (tracker.verbose()) {
-            System.err.printf("[%s] %5.1f%% (%d/%d) %s %s%n",
-                bar, stats.pct(), currentCompleted, tracker.total(), stats.eta(), stats.rate());
-        } else {
-            System.err.printf("[%s] %5.1f%% (%d/%d)%n",
-                bar, stats.pct(), currentCompleted, tracker.total());
-        }
+        // Use the tracker's toString() method to get enhanced formatting
+        // This allows FolderProgressTracker to show bytes+files+pages format
+        String progressLine = tracker.toString();
+        System.err.println(progressLine);
     }
     
     private static String progressBar(int completed, int total) {
@@ -84,9 +77,20 @@ public class DualProgressRenderer {
         var progress = Math.min(1.0, (double) completed / total);
         var filled = (int) (width * progress);
         
+        // ANSI color codes for PDF progress - distinct green theme
+        String BRIGHT_GREEN = "\033[92m";    // Bright green for filled
+        String DARK_GRAY = "\033[90m";       // Dark gray for empty
+        String RESET = "\033[0m";
+        
         var sb = new StringBuilder();
-        for (int i = 0; i < filled; i++) sb.append('█');
-        for (int i = filled; i < width; i++) sb.append('░');
+        // Filled portion in bright green
+        for (int i = 0; i < filled; i++) sb.append(BRIGHT_GREEN).append('█');
+        if (filled > 0) sb.append(RESET);
+        
+        // Empty portion in dark gray
+        for (int i = filled; i < width; i++) sb.append(DARK_GRAY).append('░');
+        if (filled < width) sb.append(RESET);
+        
         return sb.toString();
     }
 }

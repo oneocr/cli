@@ -1,6 +1,5 @@
 package xyz.jphil.win11_oneocr.tools.folder;
 
-import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
@@ -11,7 +10,8 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Callable;
-import xyz.jphil.win11_oneocr.tools.LogFormatter;
+import xyz.jphil.win11_oneocr.OneOcrApi;
+import xyz.jphil.win11_oneocr.tools.DualProgressRenderer;
 import xyz.jphil.win11_oneocr.tools.OcrTool;
 import xyz.jphil.win11_oneocr.tools.ProgressTracker;
 import xyz.jphil.win11_oneocr.tools.ProgressAwareLogFormatter;
@@ -28,7 +28,7 @@ import xyz.jphil.win11_oneocr.tools.ProgressAwareLogFormatter;
 public class FolderOcrCommand implements Callable<Integer> {
 
     @picocli.CommandLine.ParentCommand
-    private xyz.jphil.win11_oneocr.tools.OcrTool parentCommand;
+    private OcrTool parentCommand;
     
     private int getThreads() {
         return parentCommand != null ? parentCommand.getThreads() : 1;
@@ -103,11 +103,10 @@ public class FolderOcrCommand implements Callable<Integer> {
         }
         
         // Enable folder mode for dual progress support
-        xyz.jphil.win11_oneocr.tools.DualProgressRenderer.enableFolderMode();
+        DualProgressRenderer.enableFolderMode();
         
-        // Initialize folder progress tracker with ACTUAL discovered file count
-        int actualFileCount = workQueue.getTotalFiles();
-        var progress = new FolderProgressTracker("Folder OCR Processing", actualFileCount, verbose, "folder-progress");
+        // Initialize folder progress tracker with WorkQueue for bytes-based progress
+        var progress = new FolderProgressTracker("Folder OCR Processing", workQueue, verbose, "folder-progress");
         progress.start();
         
         // Create progress-aware logger to prevent output interference
@@ -122,8 +121,7 @@ public class FolderOcrCommand implements Callable<Integer> {
             try {
                 workItem = workQueue.takeWork();
                 
-                // Update progress tracker with current scope knowledge
-                updateProgressScope(progress, workQueue);
+                // FolderProgressTracker automatically uses WorkQueue metrics - no manual updates needed
                 
                 boolean success = switch (workItem.fileType()) {
                     case IMAGE -> processImageFile(workItem.filePath(), outputPath, progressAwareLog);
@@ -136,11 +134,15 @@ public class FolderOcrCommand implements Callable<Integer> {
                 
                 if (success) {
                     successCount++;
+                    // Mark work completed for accurate bytes-based progress
+                    // For already completed files, use actual page count if available
+                    int actualPages = getActualPageCount(workItem);
+                    progress.markWorkCompleted(workItem, actualPages);
                 } else {
                     errorCount++;
+                    // Still mark as completed for progress tracking (even if failed)
+                    progress.markWorkCompleted(workItem, 0); // 0 pages processed for failed files
                 }
-                
-                progress.inc();
                 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -149,7 +151,10 @@ public class FolderOcrCommand implements Callable<Integer> {
                 var fileName = workItem != null ? workItem.getDisplayName() : "unknown file";
                 progress.err(String.format("Failed to process %s: %s", fileName, e.getMessage()));
                 errorCount++;
-                progress.inc();
+                // Mark work completed even for exceptions (for progress tracking)
+                if (workItem != null) {
+                    progress.markWorkCompleted(workItem, 0); // 0 pages processed for failed files
+                }
             }
         }
         
@@ -158,7 +163,7 @@ public class FolderOcrCommand implements Callable<Integer> {
         System.out.printf("📊 Processing complete: %d success, %d errors%n", successCount, errorCount);
         
         // Disable folder mode to clean up
-        xyz.jphil.win11_oneocr.tools.DualProgressRenderer.disableFolderMode();
+        DualProgressRenderer.disableFolderMode();
         
         return errorCount > 0 ? 1 : 0;
     }
@@ -178,7 +183,7 @@ public class FolderOcrCommand implements Callable<Integer> {
             
             // Perform OCR
             OcrResult result;
-            try (var ocrApi = new xyz.jphil.win11_oneocr.OneOcrApi()) {
+            try (var ocrApi = new OneOcrApi()) {
                 var initOptions = ocrApi.createInitOptions();
                 var pipeline = ocrApi.createPipeline(initOptions);
                 var processOptions = ocrApi.createProcessOptions(maxLines);
@@ -335,13 +340,26 @@ public class FolderOcrCommand implements Callable<Integer> {
         return workQueue.getTotalFiles() > 0;
     }
     
-    private void updateProgressScope(ProgressTracker progress, WorkQueue workQueue) {
-        if (progress instanceof FolderProgressTracker folderProgress) {
-            var totalFiles = workQueue.getTotalFiles();
-            if (totalFiles > folderProgress.total()) {
-                folderProgress.updateTotal(totalFiles);
+    // updateProgressScope() removed - FolderProgressTracker now gets totals directly from WorkQueue
+    
+    private int getActualPageCount(WorkItem workItem) {
+        // If we already have actual page count, use it
+        if (workItem.isPageCountActual()) {
+            return workItem.estimatedPages();
+        }
+        
+        // For already completed PDFs, try to get actual page count
+        if (workItem.fileType() == FileProcessor.FileType.PDF) {
+            try {
+                var pdfInfo = xyz.jphil.win11_oneocr.tools.pdf.PdfInfoUtil.getPdfInfo(workItem.filePath().toFile());
+                return pdfInfo.pageCount();
+            } catch (Exception e) {
+                // Fallback to estimated pages if we can't read PDF
+                return workItem.estimatedPages();
             }
         }
+        
+        return workItem.estimatedPages(); // For images
     }
     
     /**

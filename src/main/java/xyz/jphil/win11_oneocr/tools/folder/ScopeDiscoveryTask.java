@@ -23,16 +23,15 @@ public class ScopeDiscoveryTask implements Runnable {
             }
             
             var files = fileProcessor.discoverFiles();
-            var stats = fileProcessor.analyzeFiles(files);
+            // Skip analyzeFiles() - we don't want premature "Found X files" message on network drives
             
             for (Path file : files) {
                 var fileType = fileProcessor.getFileType(file);
                 var sizeBytes = getFileSize(file);
-                var pageCountInfo = getPageCountInfo(file, fileType, sizeBytes);
                 
-                var workItem = new WorkItem(file, fileType, sizeBytes, 
-                    pageCountInfo.pageCount(), pageCountInfo.isActual());
-                workQueue.addWork(workItem);
+                // Fast scoping: only collect filename + filesize (no PDF page count reading)
+                var scopeItem = new ScopeItem(file, fileType, sizeBytes);
+                workQueue.addScopeItem(scopeItem);
             }
             
             workQueue.markDiscoveryComplete();

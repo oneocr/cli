@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class WorkQueue {
-    private final BlockingQueue<WorkItem> queue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<ScopeItem> scopeQueue = new LinkedBlockingQueue<>();
     private final AtomicBoolean discoveryComplete = new AtomicBoolean(false);
     
     // Total metrics (discovered during scope discovery)
@@ -24,26 +24,33 @@ public class WorkQueue {
     private final AtomicInteger pagesFromActualCount = new AtomicInteger(0);
     private final AtomicInteger pagesFromEstimate = new AtomicInteger(0);
     
-    public void addWork(WorkItem item) {
-        queue.offer(item);
+    public void addScopeItem(ScopeItem item) {
+        scopeQueue.offer(item);
         totalFiles.incrementAndGet();
-        totalPages.addAndGet(item.estimatedPages());
         totalBytes.addAndGet(item.fileSizeBytes());
         
-        // Track page count reliability
-        if (item.isPageCountActual()) {
-            pagesFromActualCount.addAndGet(item.estimatedPages());
-        } else {
-            pagesFromEstimate.addAndGet(item.estimatedPages());
-        }
+        // Don't add pages during scoping - will be added during actual processing
+        // This keeps scoping fast (no PDF page count reading)
     }
     
     public WorkItem takeWork() throws InterruptedException {
-        return queue.take();
+        // Take ScopeItem from queue and convert to WorkItem (reads PDF info when needed)
+        ScopeItem scopeItem = scopeQueue.take();
+        WorkItem workItem = scopeItem.toWorkItem();
+        
+        // Update page count metrics now that we have actual/estimated pages
+        totalPages.addAndGet(workItem.estimatedPages());
+        if (workItem.isPageCountActual()) {
+            pagesFromActualCount.addAndGet(workItem.estimatedPages());
+        } else {
+            pagesFromEstimate.addAndGet(workItem.estimatedPages());
+        }
+        
+        return workItem;
     }
     
     public boolean hasWork() {
-        return !queue.isEmpty() || !discoveryComplete.get();
+        return !scopeQueue.isEmpty() || !discoveryComplete.get();
     }
     
     public void markDiscoveryComplete() {
@@ -59,7 +66,44 @@ public class WorkQueue {
     }
     
     public long getTotalPages() {
-        return totalPages.get();
+        // Use dynamic estimation based on processed PDFs
+        return getEstimatedTotalPages();
+    }
+    
+    private long getEstimatedTotalPages() {
+        long knownTotalPages = totalPages.get(); // Pages from PDFs we've read (started processing)
+        long totalBytesAll = totalBytes.get(); // Total bytes of all PDFs
+        
+        // For accurate estimation, we need pages and bytes from the SAME set of PDFs
+        // Since totalPages accumulates as we start each PDF (in takeWork), and completedBytes
+        // accumulates as we finish each PDF, we need a way to get consistent data.
+        
+        // Use available data for ratio calculation - we need pages and bytes from SAME PDFs
+        // Problem: totalPages is from started PDFs, completedBytes is from finished PDFs (mismatch)
+        // Solution: Use completedPages/completedBytes when available, fallback to reasonable estimation
+        
+        long completedPagesCount = completedPages.get(); // Pages from completed PDFs  
+        long completedBytesCount = completedBytes.get(); // Bytes from completed PDFs
+        
+        if (completedPagesCount > 0 && completedBytesCount > 0) {
+            // Use completed PDFs for accurate ratio
+            double pagesPerByte = (double) completedPagesCount / completedBytesCount;
+            long estimatedTotal = Math.round(totalBytesAll * pagesPerByte);
+            return Math.max(knownTotalPages, estimatedTotal);
+        } else {
+            // Fallback: estimate based on current processing data
+            // We know total size (115.2GB), we have some pages (3361) from some bytes (255.8MB)
+            // Your formula: estimated_total_pages = total_pdfs_size * (n_pdf_total_pages / n_pdf_total_filesize)
+            // Use currently processed bytes as denominator (imperfect but better than no estimate)
+            long processedBytes = completedBytes.get();
+            if (processedBytes == 0) {
+                return knownTotalPages; // Really no data yet
+            }
+            
+            double pagesPerByte = (double) knownTotalPages / processedBytes;
+            long estimatedTotal = Math.round(totalBytesAll * pagesPerByte);
+            return Math.max(knownTotalPages, estimatedTotal);
+        }
     }
     
     public long getTotalBytes() {
@@ -99,6 +143,6 @@ public class WorkQueue {
     }
     
     public int getQueueSize() {
-        return queue.size();
+        return scopeQueue.size();
     }
 }

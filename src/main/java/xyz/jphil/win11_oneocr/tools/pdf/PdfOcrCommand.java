@@ -7,6 +7,7 @@ import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.rendering.*;
 import picocli.CommandLine.*;
 import xyz.jphil.win11_oneocr.*;
+import xyz.jphil.win11_oneocr.tools.DualProgressRenderer;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -127,6 +128,13 @@ public class PdfOcrCommand implements Callable<Integer> {
             // Step 2: Process PDF with progress tracking
             var progress = new ProgressTracker("PDF OCR Processing", pdfInfo.pageCount(), verbose);
             
+            // Register with dual progress renderer if in folder mode
+            String pdfProgressId = null;
+            if (DualProgressRenderer.isFolderModeActive()) {
+                pdfProgressId = "pdf(" + pdfFile.getName() + ")";
+                DualProgressRenderer.register(pdfProgressId, progress);
+            }
+            
             progress.start();
             
             List<PagedOcrResult> results = (getThreads() == 1) 
@@ -193,6 +201,11 @@ public class PdfOcrCommand implements Callable<Integer> {
 
             // Size matrix report removed - preview images now use simple calculated DPI
 
+            // Unregister from dual progress renderer if in folder mode
+            if (pdfProgressId != null) {
+                DualProgressRenderer.unregister(pdfProgressId);
+            }
+            
             progress.done();
             System.out.println("Combined text file: " + baseName + ".oneocr.txt");
             System.out.println("Combined XHTML file: " + baseName + ".oneocr.xhtml");

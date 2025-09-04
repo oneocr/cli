@@ -2,89 +2,89 @@ package xyz.jphil.win11_oneocr.tools.folder;
 
 import xyz.jphil.win11_oneocr.tools.ProgressTracker;
 import xyz.jphil.win11_oneocr.tools.DualProgressRenderer;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Folder-mode ProgressTracker with dynamic total support.
+ * Uses WorkQueue ProgressMetrics for bytes-based progress calculation.
  * Registers with DualProgressRenderer for coordinated display.
  */
 public class FolderProgressTracker extends ProgressTracker {
-    private final AtomicInteger dynamicTotal;
+    private final WorkQueue workQueue;
     private final String trackerId;
     
-    public FolderProgressTracker(String task, int initialTotal, boolean verbose, String trackerId) {
-        super(task, initialTotal, verbose);
-        this.dynamicTotal = new AtomicInteger(initialTotal);
+    public FolderProgressTracker(String task, WorkQueue workQueue, boolean verbose, String trackerId) {
+        super(task, 1, verbose); // Use dummy total, we'll use workQueue metrics
+        this.workQueue = workQueue;
         this.trackerId = trackerId;
         
         // Register with dual progress renderer
         DualProgressRenderer.register(trackerId, this);
     }
     
-    public void updateTotal(int newTotal) {
-        dynamicTotal.set(Math.max(newTotal, dynamicTotal.get()));
-    }
+    // updateTotal() no longer needed - WorkQueue handles totals automatically
     
     @Override
     public int total() {
-        return dynamicTotal.get();
+        // Return total files for basic compatibility, but percentage uses bytes
+        return workQueue.getTotalFiles();
     }
     
     @Override
     public String toString() {
-        // Use different visual style for folder progress (vs PDF progress)
-        // Access completed count through reflection or use a different approach
-        String superToString = super.toString();
-        int currentTotal = dynamicTotal.get();
+        var metrics = workQueue.getProgressMetrics();
+        double progress = metrics.getProgressByBytes(); // ALWAYS use filesize-based progress as requested
         
-        // Extract completed count from super's calculation
-        int currentCompleted = extractCompletedFromSuper();
-        if (currentCompleted < 0) {
-            // Fallback to super's rendering if we can't extract
-            return superToString.replace("█", "▓"); // Just change the visual
+        String progressBar = renderFolderProgressBar(progress);
+        String progressLabel = "bytes"; // Always bytes since we're always using filesize
+        
+        // Always show bytes since we're always using filesize-based progress
+        // Format display with brackets for clarity  
+        if ("bytes".equals(progressLabel) && metrics.totalBytes() > 0) {
+            return String.format("[%s] %5.1f%% (%s/%s) [files: %d/%d] [pages: %d/~%d]", 
+                progressBar, progress * 100,
+                metrics.formatBytes(metrics.completedBytes()),
+                metrics.formatBytes(metrics.totalBytes()),
+                metrics.completedFiles(), metrics.totalFiles(),
+                metrics.completedPages(), metrics.totalPages());
+        } else {
+            // Fallback when no bytes data available yet
+            return String.format("[%s] %5.1f%% [files: %d/%d] [pages: %d/~%d] (no bytes data yet)", 
+                progressBar, progress * 100,
+                metrics.completedFiles(), metrics.totalFiles(),
+                metrics.completedPages(), metrics.totalPages());
         }
-        
-        if (currentTotal == 0) {
-            return String.format("[%s] %s", renderFolderProgressBar(0.0), "0.0%");
-        }
-        
-        double pct = (double) currentCompleted / currentTotal * 100;
-        
-        return String.format("[%s] %5.1f%% (%d/%d) ETA: %s Rate: %s", 
-            renderFolderProgressBar(pct / 100.0), pct, currentCompleted, currentTotal,
-            "calculating...", "calculating...");
     }
     
     private String renderFolderProgressBar(double progress) {
         int width = 25;
         int filled = (int) Math.round(progress * width);
-        // Use different characters for folder progress: ▓ (filled) and ░ (empty)
-        return "▓".repeat(Math.max(0, filled)) + "░".repeat(Math.max(0, width - filled));
+        
+        // ANSI color codes for folder progress - distinct blue theme
+        String BRIGHT_CYAN = "\033[96m";    // Bright cyan for filled
+        String DARK_BLUE = "\033[94m";      // Dark blue for empty
+        String RESET = "\033[0m";
+        
+        // Use different characters and colors for folder progress: ▓ (filled) and ░ (empty)
+        String filledBar = BRIGHT_CYAN + "▓".repeat(Math.max(0, filled)) + RESET;
+        String emptyBar = DARK_BLUE + "░".repeat(Math.max(0, width - filled)) + RESET;
+        
+        return filledBar + emptyBar;
     }
     
-    private String formatDuration(java.time.Duration duration) {
-        long seconds = duration.getSeconds();
-        if (seconds < 60) return seconds + "s";
-        long minutes = seconds / 60;
-        if (minutes < 60) return minutes + "m " + (seconds % 60) + "s";
-        long hours = minutes / 60;
-        return hours + "h " + (minutes % 60) + "m";
-    }
-    
-    private int extractCompletedFromSuper() {
-        // Simple approach - use reflection to access the completed field
-        try {
-            var field = ProgressTracker.class.getDeclaredField("completed");
-            field.setAccessible(true);
-            return ((java.util.concurrent.atomic.AtomicInteger) field.get(this)).get();
-        } catch (Exception e) {
-            return -1; // Signal failure
+    // Mark work completed with actual processed pages for accurate progress tracking
+    public void markWorkCompleted(WorkItem workItem, int actualPagesProcessed) {
+        workQueue.markWorkCompleted(workItem, actualPagesProcessed);
+        
+        // Trigger coordinated rendering in folder mode
+        if (DualProgressRenderer.isFolderModeActive()) {
+            DualProgressRenderer.renderAll();
         }
     }
     
     @Override
     public ProgressTracker inc() {
-        super.inc();
+        // Don't call super.inc() - we use WorkQueue metrics instead of base counter
+        
         // Trigger coordinated rendering in folder mode
         if (DualProgressRenderer.isFolderModeActive()) {
             DualProgressRenderer.renderAll();
