@@ -1,8 +1,6 @@
 package xyz.jphil.win11_oneocr.tools.folder;
 
 import java.nio.file.Path;
-import java.util.List;
-import xyz.jphil.win11_oneocr.tools.pdf.PdfInfoUtil;
 
 public class ScopeDiscoveryTask implements Runnable {
     private final WorkQueue workQueue;
@@ -53,35 +51,6 @@ public class ScopeDiscoveryTask implements Runnable {
         }
     }
     
-    private PageCountInfo getPageCountInfo(Path file, FileProcessor.FileType fileType, long sizeBytes) {
-        if (fileType == FileProcessor.FileType.IMAGE) {
-            return new PageCountInfo(1, true);
-        } else {
-            // For PDFs, try to get actual page count first
-            try {
-                var pdfInfo = PdfInfoUtil.getPdfInfo(file.toFile());
-                return new PageCountInfo(pdfInfo.pageCount(), true);
-            } catch (Exception e) {
-                // Fallback: Size-based page estimation for Google Drive/network files
-                int estimatedPages = estimatePagesFromSize(sizeBytes);
-                if (verbose) {
-                    System.err.printf("📊 PDF header unreadable for %s, estimated %d pages from %s%n", 
-                        file.getFileName(), estimatedPages, formatSize(sizeBytes));
-                }
-                return new PageCountInfo(estimatedPages, false);
-            }
-        }
-    }
-    
-    private int estimatePagesFromSize(long sizeBytes) {
-        // Estimation based on typical PDF sizes:
-        // - Text-heavy PDFs: ~100-200KB per page
-        // - Image-heavy PDFs: ~300-500KB per page  
-        // - Mixed content: ~150KB per page (conservative)
-        long avgBytesPerPage = 150 * 1024; // 150KB per page
-        return Math.max(1, (int)(sizeBytes / avgBytesPerPage));
-    }
-    
     private String formatSize(long bytes) {
         if (bytes >= 1024 * 1024 * 1024) {
             return String.format("%.1fGB", bytes / (1024.0 * 1024.0 * 1024.0));
@@ -93,13 +62,4 @@ public class ScopeDiscoveryTask implements Runnable {
             return bytes + "B";
         }
     }
-    
-    private String getReliabilityLabel(double reliability) {
-        if (reliability >= 0.9) return "exact";
-        else if (reliability >= 0.7) return "mostly exact";
-        else if (reliability >= 0.3) return "mixed";
-        else return "estimated";
-    }
-    
-    private record PageCountInfo(int pageCount, boolean isActual) {}
 }

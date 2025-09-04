@@ -30,9 +30,6 @@ public class FolderOcrCommand implements Callable<Integer> {
     @picocli.CommandLine.ParentCommand
     private OcrTool parentCommand;
     
-    private int getThreads() {
-        return parentCommand != null ? parentCommand.getThreads() : 1;
-    }
     
     @Parameters(
         index = "0", 

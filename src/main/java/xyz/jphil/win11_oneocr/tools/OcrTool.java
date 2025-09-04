@@ -2,6 +2,7 @@ package xyz.jphil.win11_oneocr.tools;
 
 import xyz.jphil.win11_oneocr.tools.folder.FolderOcrCommand;
 import xyz.jphil.win11_oneocr.tools.pdf.PdfOcrCommand;
+import xyz.jphil.win11_oneocr.tools.ui.UiCommand;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -25,7 +26,7 @@ import java.util.concurrent.Callable;
     mixinStandardHelpOptions = true, 
     version = "1.0",
     description = "Windows 11 OneOCR command-line tool - Extract text from images using Windows built-in OCR",
-    subcommands = {PdfOcrCommand.class, FolderOcrCommand.class}
+    subcommands = {PdfOcrCommand.class, FolderOcrCommand.class, UiCommand.class}
 )
 public class OcrTool implements Callable<Integer> {
 

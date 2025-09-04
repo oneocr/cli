@@ -73,15 +73,6 @@ public class WorkQueue {
     private long getEstimatedTotalPages() {
         long knownTotalPages = totalPages.get(); // Pages from PDFs we've read (started processing)
         long totalBytesAll = totalBytes.get(); // Total bytes of all PDFs
-        
-        // For accurate estimation, we need pages and bytes from the SAME set of PDFs
-        // Since totalPages accumulates as we start each PDF (in takeWork), and completedBytes
-        // accumulates as we finish each PDF, we need a way to get consistent data.
-        
-        // Use available data for ratio calculation - we need pages and bytes from SAME PDFs
-        // Problem: totalPages is from started PDFs, completedBytes is from finished PDFs (mismatch)
-        // Solution: Use completedPages/completedBytes when available, fallback to reasonable estimation
-        
         long completedPagesCount = completedPages.get(); // Pages from completed PDFs  
         long completedBytesCount = completedBytes.get(); // Bytes from completed PDFs
         
@@ -90,19 +81,14 @@ public class WorkQueue {
             double pagesPerByte = (double) completedPagesCount / completedBytesCount;
             long estimatedTotal = Math.round(totalBytesAll * pagesPerByte);
             return Math.max(knownTotalPages, estimatedTotal);
-        } else {
-            // Fallback: estimate based on current processing data
-            // We know total size (115.2GB), we have some pages (3361) from some bytes (255.8MB)
+        } else if (knownTotalPages > 0 && completedBytesCount > 0) {
+            // Fallback: Use known pages from started PDFs with completed bytes
             // Your formula: estimated_total_pages = total_pdfs_size * (n_pdf_total_pages / n_pdf_total_filesize)
-            // Use currently processed bytes as denominator (imperfect but better than no estimate)
-            long processedBytes = completedBytes.get();
-            if (processedBytes == 0) {
-                return knownTotalPages; // Really no data yet
-            }
-            
-            double pagesPerByte = (double) knownTotalPages / processedBytes;
+            double pagesPerByte = (double) knownTotalPages / completedBytesCount;
             long estimatedTotal = Math.round(totalBytesAll * pagesPerByte);
             return Math.max(knownTotalPages, estimatedTotal);
+        } else {
+            return knownTotalPages; // No data for estimation yet
         }
     }
     
@@ -136,7 +122,7 @@ public class WorkQueue {
     public ProgressMetrics getProgressMetrics() {
         return new ProgressMetrics(
             totalFiles.get(), completedFiles.get(),
-            totalPages.get(), completedPages.get(), 
+            getTotalPages(), completedPages.get(),  // Use getTotalPages() for estimation
             totalBytes.get(), completedBytes.get(),
             getPageCountReliability()
         );
