@@ -81,6 +81,13 @@ public class OcrDSL {
         return new HtmlAttribute("imgHeight", String.valueOf(height));//easier for ai to understand
     }
     
+    /**
+     * Which engines produced this text: engine="oneocr" or engine="oneocr+tesseract"
+     */
+    public static HtmlAttribute engine(String value) {
+        return new HtmlAttribute("engine", value);
+    }
+
     public static HtmlAttribute timestamp(String value) {
         return new HtmlAttribute("timestamp", value);
     }

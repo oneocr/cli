@@ -45,6 +45,8 @@ public class StandardOutputTest {
     
     @Test
     void generateStandardOutputs() throws Exception {
+        // for pretty print of unicode characters
+        xyz.jphil.windows_console_set_unicode_output.WindowsConsoleSetUnicodeOutput.enable();
         System.out.println("=== Standard OCR Output Generation Test ===");
         System.out.println("Image: " + testImagePath.toAbsolutePath());
         

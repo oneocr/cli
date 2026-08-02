@@ -15,6 +15,7 @@ import xyz.jphil.win11_oneocr.tools.DualProgressRenderer;
 import xyz.jphil.win11_oneocr.tools.OcrTool;
 import xyz.jphil.win11_oneocr.tools.ProgressTracker;
 import xyz.jphil.win11_oneocr.tools.ProgressAwareLogFormatter;
+import xyz.jphil.win11_oneocr.tools.folder.FileProcessor.FileType;
 
 /**
  * Folder OCR processing subcommand for OcrTool
@@ -67,6 +68,58 @@ public class FolderOcrCommand implements Callable<Integer> {
     )
     private int maxLines = 1000;
     
+    // Progress callback for tracking current file processing
+    private PdfProgressCallback currentCallback;
+    
+    // Helper class to track PDF processing progress
+    private static class PdfProgressCallback implements PdfOcrCommand.PageProgressCallback {
+        private final FolderProgressTracker folderTracker;
+        private WorkItem currentWorkItem;
+        private long fileStartTimeMs;
+        private int totalPagesProcessed = 0;
+        
+        public PdfProgressCallback(FolderProgressTracker folderTracker) {
+            this.folderTracker = folderTracker;
+        }
+        
+        @Override
+        public void onFileStarted(String fileName, int totalPages, long fileSizeBytes) {
+            fileStartTimeMs = System.currentTimeMillis();
+            totalPagesProcessed = 0;
+            // System.err.println("DEBUG: onFileStarted - " + fileName + " (" + totalPages + " pages) - currentWorkItem: " + (currentWorkItem != null ? "SET" : "NULL")); // Debug removed
+        }
+        
+        @Override
+        public void onPageCompleted(int pageNumber, long pageProcessingTimeMs) {
+            // Update real-time progress with each page completion
+            if (currentWorkItem != null) {
+                folderTracker.markPageProgress(currentWorkItem, pageNumber, pageProcessingTimeMs);
+                totalPagesProcessed++;
+                if (pageNumber <= 10 && pageProcessingTimeMs > 0) { // Debug first few pages of actual processing
+                    System.err.println("DEBUG: onPageCompleted - page: " + pageNumber + ", time: " + pageProcessingTimeMs + "ms, workItem: SET");
+                } // Debug to check if real OCR timing reaches folder tracker
+            } else {
+                // This shouldn't happen if setCurrentWorkItem is called properly
+                System.err.println("DEBUG: onPageCompleted called without currentWorkItem - page: " + pageNumber + ", time: " + pageProcessingTimeMs + "ms");
+            }
+        }
+        
+        public void setCurrentWorkItem(WorkItem workItem) {
+            this.currentWorkItem = workItem;
+            if (workItem != null) {
+                folderTracker.startFileProgress(workItem);
+            }
+        }
+        
+        public long getTotalProcessingTimeMs() {
+            return System.currentTimeMillis() - fileStartTimeMs;
+        }
+        
+        public int getTotalPagesProcessed() {
+            return totalPagesProcessed;
+        }
+    }
+    
     @Override
     public Integer call() throws Exception {
         // Validate input folder
@@ -106,6 +159,9 @@ public class FolderOcrCommand implements Callable<Integer> {
         var progress = new FolderProgressTracker("Folder OCR Processing", workQueue, verbose, "folder-progress");
         progress.start();
         
+        // Initialize progress callback for real-time ETA updates
+        currentCallback = new PdfProgressCallback(progress);
+        
         // Create progress-aware logger to prevent output interference
         var progressAwareLog = ProgressAwareLogFormatter.create(verbose, progress);
         
@@ -117,6 +173,11 @@ public class FolderOcrCommand implements Callable<Integer> {
             WorkItem workItem = null;
             try {
                 workItem = workQueue.takeWork();
+                
+                // Set current work item for progress tracking
+                if (workItem.fileType() == FileType.PDF) {
+                    currentCallback.setCurrentWorkItem(workItem);
+                }
                 
                 // FolderProgressTracker automatically uses WorkQueue metrics - no manual updates needed
                 
@@ -132,9 +193,16 @@ public class FolderOcrCommand implements Callable<Integer> {
                 if (success) {
                     successCount++;
                     // Mark work completed for accurate bytes-based progress
-                    // For already completed files, use actual page count if available
-                    int actualPages = getActualPageCount(workItem);
-                    progress.markWorkCompleted(workItem, actualPages);
+                    if (workItem.fileType() == FileType.PDF && currentCallback != null) {
+                        // Use callback data for more accurate tracking
+                        long processingTime = currentCallback.getTotalProcessingTimeMs();
+                        int pagesProcessed = currentCallback.getTotalPagesProcessed();
+                        progress.markWorkCompleted(workItem, pagesProcessed, processingTime);
+                    } else {
+                        // For images and already completed files, use actual page count if available
+                        int actualPages = getActualPageCount(workItem);
+                        progress.markWorkCompleted(workItem, actualPages);
+                    }
                 } else {
                     errorCount++;
                     // Still mark as completed for progress tracking (even if failed)
@@ -227,6 +295,22 @@ public class FolderOcrCommand implements Callable<Integer> {
             // EARLY EXIT: Check if PDF processing is already complete (skip expensive operations)
             if (isPdfProcessingComplete(file, pdfOutputDir)) {
                 log.success("PDF", "Already completed: " + file.getFileName());
+                
+                // IMPORTANT: Report pages for already-completed files to folder progress tracker
+                // Even though we don't need to process this file, we need to count its pages
+                if (currentCallback != null && currentCallback.currentWorkItem != null) {
+                    // Get the page count from the work item (estimated pages)
+                    WorkItem workItem = currentCallback.currentWorkItem;
+                    int pageCount = workItem.estimatedPages();
+                    // System.err.println("DEBUG: Already completed file - reporting " + pageCount + " pages"); // Debug removed
+                    
+                    // Simulate file started and all pages completed (with 0ms processing time)
+                    currentCallback.onFileStarted(file.getFileName().toString(), pageCount, workItem.fileSizeBytes());
+                    for (int page = 1; page <= pageCount; page++) {
+                        currentCallback.onPageCompleted(page, 0); // 0ms = skipped
+                    }
+                }
+                
                 return true;
             }
             
@@ -238,6 +322,9 @@ public class FolderOcrCommand implements Callable<Integer> {
             
             // Set up parent command relationship so PdfOcrCommand can access --threads
             pdfCommand.setParentCommand(this.parentCommand);
+            
+            // Set up page progress callback for real-time ETA updates
+            pdfCommand.setPageProgressCallback(currentCallback);
             
             // Create command line args for the PDF command
             java.util.List<String> pdfArgsList = new java.util.ArrayList<>();
@@ -255,9 +342,10 @@ public class FolderOcrCommand implements Callable<Integer> {
             
             String[] pdfArgs = pdfArgsList.toArray(new String[0]);
             
-            // Execute the PDF command
+            // Parse arguments through picocli but call directly to preserve callback
             var cmdLine = new picocli.CommandLine(pdfCommand);
-            int result = cmdLine.execute(pdfArgs);
+            cmdLine.parseArgs(pdfArgs); // Parse arguments into the command object
+            int result = pdfCommand.call(); // Call directly to preserve callback
             
             // DUAL PROGRESS: Continue with simultaneous rendering
             

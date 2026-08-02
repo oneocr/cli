@@ -7,15 +7,14 @@ import xyz.jphil.win11_oneocr.*;
 import luvx.*;
 import static luvml.E.*;
 import static luvml.A.*;
-import static luvml.T.*;
 import static luvml.Frags.*;
 import static luvml.ProcessingInstruction.xmlDeclaration;
 import static xyz.jphil.win11_oneocr.tools.OcrDSL.*;
 import luvml.DocType;
 import luvml.E;
 
-import luvml.semantic.*;
 import java.util.*;
+import luvml.element.*;
 import luvml.o.XHtmlStringRenderer;
 import static xyz.jphil.win11_oneocr.tools.PagedOcrData.*;
 
@@ -29,9 +28,13 @@ public class OcrToSemanticXHtml {
      * Serialize OCR results to XHTML format using luvml DSL
      */
     public static String toXHtml(OcrResult result, String imageFile, int imageWidth, int imageHeight) {
+        return toXHtml(result, imageFile, imageWidth, imageHeight, OcrMetadata.ENGINE_ONEOCR);
+    }
+
+    public static String toXHtml(OcrResult result, String imageFile, int imageWidth, int imageHeight, String engineName) {
         // Create metadata record
-        var metadata = OcrMetadata.create(imageFile, imageWidth, imageHeight, result);
-        
+        var metadata = OcrMetadata.create(imageFile, imageWidth, imageHeight, result, engineName);
+
         // Build OCR content fragments using DSL
         var segments = frags();
         
@@ -79,6 +82,7 @@ public class OcrToSemanticXHtml {
             class_("win11OneOcrPage"),
             srcName(metadata.file()),
             imgWidth(metadata.width()),imgHeight(metadata.height()),
+            engine(metadata.engine()),
             timestamp(metadata.timestampUTCISO()),
             angle(formatNumber(result.textAngle())),
             ocrSegmentsCount(String.valueOf(metadata.metrics().linesCount())),
@@ -283,7 +287,7 @@ public class OcrToSemanticXHtml {
     /**
      * OCR root element
      */
-    public static class Ocr_E extends SemanticBlockContainerElement<Ocr_E> {
+    public static class Ocr_E extends SemanticBlockContainerElement<Ocr_E>   implements SemanticElementTagNameClassNameMapping.CamelCase_E {
         public Ocr_E(Frag_I<?>... fragments) {
             super(Ocr_E.class);
             ____(fragments);
@@ -293,7 +297,7 @@ public class OcrToSemanticXHtml {
     /**
      * Segment element (detected text segment: lines/cells/blocks)
      */
-    public static class Segment_E extends SemanticBlockContainerElement<Segment_E> {
+    public static class Segment_E extends SemanticBlockContainerElement<Segment_E> implements SemanticElementTagNameClassNameMapping.CamelCase_E {
         public Segment_E(Frag_I<?>... fragments) {
             super(Segment_E.class);
             ____(fragments);
@@ -303,7 +307,7 @@ public class OcrToSemanticXHtml {
     /**
      * Word element
      */
-    public static class W_E extends SemanticInlineContainerElement<W_E> {
+    public static class W_E extends SemanticInlineContainerElement<W_E> implements SemanticElementTagNameClassNameMapping.CamelCase_E  {
         public W_E(Frag_I<?>... fragments) {
             super(W_E.class);
             ____(fragments);

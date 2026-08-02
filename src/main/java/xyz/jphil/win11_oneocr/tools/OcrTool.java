@@ -8,14 +8,14 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 import xyz.jphil.win11_oneocr.*;
+import xyz.jphil.win11_oneocr.tools.improve.*;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.File;
-import java.io.PrintStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.concurrent.Callable;
+import xyz.jphil.windows_console_set_unicode_output.WindowsConsoleSetUnicodeOutput;
 
 /**
  * Professional command-line OCR tool using Windows 11 OneOCR
@@ -65,14 +65,19 @@ public class OcrTool implements Callable<Integer> {
 
     @Option(names = {"--threads"}, description = "Number of OCR threads for parallel processing (default: 1)", defaultValue = "1")
     private int threads;
-    
+
+    @CommandLine.Mixin
+    private TessCliOptions tess = new TessCliOptions();
+
     public int getThreads() {
         return threads;
     }
 
     public static void main(String[] args) {
         // Set up UTF-8 console for proper emoji display
-        setupUtf8Console();
+        var _ = WindowsConsoleSetUnicodeOutput.enable();
+        // The library handles all the complexity and fails gracefully on non-Windows systems
+        // No need to handle the result - it's designed to work silently
         
         // Suppress logging noise from various sources
         suppressLoggingNoise();
@@ -109,14 +114,6 @@ public class OcrTool implements Callable<Integer> {
             // Silently continue if logging suppression fails
         }
     }
-    
-    private static void setupUtf8Console() {
-        // Use the Windows Console Unicode Output library for reliable Unicode support
-        var result = xyz.jphil.windows_console_set_unicode_output.WindowsConsoleSetUnicodeOutput.enable();
-        
-        // The library handles all the complexity and fails gracefully on non-Windows systems
-        // No need to handle the result - it's designed to work silently
-    }
 
     @Override
     public Integer call() throws Exception {
@@ -143,6 +140,9 @@ public class OcrTool implements Callable<Integer> {
                 progress.err("Cannot read input file");
                 return 1;
             }
+
+            // Validate the second-pass flags before spending a full OCR run on the page.
+            var improveOptions = tess.enabled() ? tess.toOptions() : null;
 
             // Load and process image
             BufferedImage image = ImageIO.read(inputFile);
@@ -221,9 +221,14 @@ public class OcrTool implements Callable<Integer> {
             }
             
             // Fallback to stdout if no outputs specified
-            if (outputFile == null && actualTextFile == null && actualJsonFile == null && 
+            if (outputFile == null && actualTextFile == null && actualJsonFile == null &&
                 actualXhtmlFile == null && actualSvgFile == null) {
                 outputStructuredText(result);
+            }
+
+            if (improveOptions != null) {
+                runTesseractPass(improveOptions, result, image,
+                    actualTextFile, actualJsonFile, actualXhtmlFile, actualSvgFile, log);
             }
 
             progress.done();
@@ -245,6 +250,47 @@ public class OcrTool implements Callable<Integer> {
         String inputFileName = inputFile.getName();
         String defaultName = inputFileName + ".oneocr." + extension;
         return new File(inputFile.getParent(), defaultName);
+    }
+
+    /** Sibling of an output file with the engine tag swapped, e.g. foo.png.oneocr+tesseract.txt */
+    static File improvedSibling(File original) {
+        return EngineNaming.improved(original);
+    }
+
+    /**
+     * Optional second pass. The original OneOCR outputs stay exactly as written; a parallel
+     * *.oneocr+tesseract.* set is produced so both readings are on disk for the record.
+     */
+    private void runTesseractPass(ImproveOptions opts, OcrResult result, BufferedImage image, File txt, File json,
+                                  File xhtml, File svg, LogFormatter log) {
+        try (var improver = new DocumentImprover(opts)) {
+            log.step("TESS", "Second pass over low-confidence lines");
+            var pages = java.util.List.of(new ImprovePage(1, result, image.getWidth()));
+            var improved = improver.improve(pages, pageNo -> image);
+            for (var line : improver.log()) log.debug("TESS", line);
+
+            var page = improved.get(0);
+            if (!page.changed()) {
+                log.success("TESS", "Nothing replaced; no second output written");
+                return;
+            }
+            var engine = OcrMetadata.ENGINE_ONEOCR_TESSERACT;
+            var name = inputFile.toPath().getFileName().toString();
+            var w = image.getWidth();
+            var h = image.getHeight();
+            if (txt != null) Files.writeString(improvedSibling(txt).toPath(), page.result().text());
+            if (json != null) Files.writeString(improvedSibling(json).toPath(),
+                CompactJsonSerializer.toCompactJson(page.result(), name, w, h, engine));
+            if (xhtml != null) Files.writeString(improvedSibling(xhtml).toPath(),
+                OcrToSemanticXHtml.toXHtml(page.result(), name, w, h, engine));
+            if (svg != null) Files.writeString(improvedSibling(svg).toPath(),
+                SvgVisualizer.createSvgVisualization(page.result(), inputFile.toPath(), w, h));
+            log.success("TESS", String.format("Replaced %d of %d flagged line(s) using %s",
+                page.bandsReplaced(), page.bandsFlagged(), String.join("+", page.langsUsed())));
+        } catch (Exception e) {
+            System.err.println("Tesseract pass failed (OneOCR output is unaffected): " + e.getMessage());
+            if (verbose) e.printStackTrace();
+        }
     }
 
     private void outputPlainText(OcrResult result, File textFile, LogFormatter log) throws Exception {

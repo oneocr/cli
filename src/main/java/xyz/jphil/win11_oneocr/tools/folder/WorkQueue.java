@@ -20,6 +20,12 @@ public class WorkQueue {
     private final AtomicLong completedPages = new AtomicLong(0);
     private final AtomicLong completedBytes = new AtomicLong(0);
     
+    // Started files metrics (for stable total page estimation)  
+    private final AtomicLong startedFilesBytes = new AtomicLong(0);
+    
+    // Cached stable total (calculated once, never changes)
+    private volatile long cachedTotalPages = -1;
+    
     // Reliability flags
     private final AtomicInteger pagesFromActualCount = new AtomicInteger(0);
     private final AtomicInteger pagesFromEstimate = new AtomicInteger(0);
@@ -46,6 +52,9 @@ public class WorkQueue {
             pagesFromEstimate.addAndGet(workItem.estimatedPages());
         }
         
+        // Track bytes from started files for stable total pages estimation
+        startedFilesBytes.addAndGet(workItem.fileSizeBytes());
+        
         return workItem;
     }
     
@@ -71,25 +80,31 @@ public class WorkQueue {
     }
     
     private long getEstimatedTotalPages() {
-        long knownTotalPages = totalPages.get(); // Pages from PDFs we've read (started processing)
-        long totalBytesAll = totalBytes.get(); // Total bytes of all PDFs
-        long completedPagesCount = completedPages.get(); // Pages from completed PDFs  
-        long completedBytesCount = completedBytes.get(); // Bytes from completed PDFs
+        // User's formula: total_pages = estimated_pages_per_byte × summation(all_pdfs_size)
+        // estimated_pages_per_byte = pages_from_started_files ÷ bytes_from_started_files
         
-        if (completedPagesCount > 0 && completedBytesCount > 0) {
-            // Use completed PDFs for accurate ratio
-            double pagesPerByte = (double) completedPagesCount / completedBytesCount;
-            long estimatedTotal = Math.round(totalBytesAll * pagesPerByte);
-            return Math.max(knownTotalPages, estimatedTotal);
-        } else if (knownTotalPages > 0 && completedBytesCount > 0) {
-            // Fallback: Use known pages from started PDFs with completed bytes
-            // Your formula: estimated_total_pages = total_pdfs_size * (n_pdf_total_pages / n_pdf_total_filesize)
-            double pagesPerByte = (double) knownTotalPages / completedBytesCount;
-            long estimatedTotal = Math.round(totalBytesAll * pagesPerByte);
-            return Math.max(knownTotalPages, estimatedTotal);
+        long totalBytesAll = totalBytes.get(); // summation(all_pdfs_size)
+        long pagesFromStartedFiles = totalPages.get(); // pages_count_of_all_started_pdfs_where_page_count_is_known
+        long bytesFromStartedFiles = startedFilesBytes.get(); // file_size_of_all_started_pdfs_where_page_count_is_known
+        
+        if (pagesFromStartedFiles > 0 && bytesFromStartedFiles > 0 && totalBytesAll > 0) {
+            // Apply your exact formula
+            double estimatedPagesPerByte = (double) pagesFromStartedFiles / bytesFromStartedFiles;
+            long estimatedTotal = Math.round(estimatedPagesPerByte * totalBytesAll);
+            
+            
+            return estimatedTotal;
         } else {
-            return knownTotalPages; // No data for estimation yet
+            // Fallback until we have started files
+            return pagesFromStartedFiles;
         }
+    }
+    
+    // Get total bytes from files where we know the page count (started processing)
+    // This provides a stable denominator for the pages-per-byte ratio
+    private long getBytesFromStartedFiles() {
+        // Return bytes from files where takeWork() was called (page count became known)
+        return startedFilesBytes.get();
     }
     
     public long getTotalBytes() {
@@ -112,6 +127,20 @@ public class WorkQueue {
         completedFiles.incrementAndGet();
         completedPages.addAndGet(actualPagesProcessed);
         completedBytes.addAndGet(item.fileSizeBytes());
+    }
+    
+    // Track partial progress for a file (page-by-page updates)
+    // Since we're using pages-based ETA, we only need to track page progress
+    public void markPartialProgress(WorkItem item, int pagesProcessedSoFar) {
+        // Only track page progress - bytes-based tracking is not needed for pages-based ETA
+        completedPages.addAndGet(1);
+    }
+    
+    // This method is kept for compatibility but not used in pages-based ETA
+    @Deprecated
+    public long getProportionalBytesProcessed() {
+        // Return only completed bytes since we're using pages-based calculations
+        return completedBytes.get();
     }
     
     public double getPageCountReliability() {

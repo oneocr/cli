@@ -3,10 +3,12 @@ package xyz.jphil.win11_oneocr.tools;
 import java.awt.image.BufferedImage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.imageio.ImageIO;
+import xyz.jphil.win11_oneocr.OcrInitOptions;
+import xyz.jphil.win11_oneocr.OcrPipeline;
+import xyz.jphil.win11_oneocr.OcrProcessOptions;
 import xyz.jphil.win11_oneocr.OcrResult;
 import xyz.jphil.win11_oneocr.OneOcrApi;
 
@@ -58,9 +60,9 @@ public class ThreadInitializationTest {
         try {
             // Initialize OCR instances in MAIN thread (like PDF processing)
             OneOcrApi[] apis = new OneOcrApi[THREAD_COUNT];
-            OneOcrApi.OcrInitOptions[] initOptions = new OneOcrApi.OcrInitOptions[THREAD_COUNT];
-            OneOcrApi.OcrPipeline[] pipelines = new OneOcrApi.OcrPipeline[THREAD_COUNT];
-            OneOcrApi.OcrProcessOptions[] processOptions = new OneOcrApi.OcrProcessOptions[THREAD_COUNT];
+            OcrInitOptions[] initOptions = new OcrInitOptions[THREAD_COUNT];
+            OcrPipeline[] pipelines = new OcrPipeline[THREAD_COUNT];
+            OcrProcessOptions[] processOptions = new OcrProcessOptions[THREAD_COUNT];
             
             for (int i = 0; i < THREAD_COUNT; i++) {
                 apis[i] = new OneOcrApi();

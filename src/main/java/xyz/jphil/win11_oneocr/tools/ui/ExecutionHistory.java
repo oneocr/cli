@@ -1,6 +1,5 @@
 package xyz.jphil.win11_oneocr.tools.ui;
 
-import xyz.jphil.win11_oneocr.OneOcrApi;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -10,6 +9,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.Objects;
+import xyz.jphil.win11_oneocr.OneOcrHomeDir;
 
 /**
  * Manages execution history for the UI command
@@ -23,8 +23,7 @@ public class ExecutionHistory {
     private final Path historyFile;
     
     public ExecutionHistory() throws IOException {
-        Path userDir = OneOcrApi.getAppHome();
-        Files.createDirectories(userDir);
+        Path userDir = OneOcrHomeDir.get(true);
         this.historyFile = userDir.resolve(HISTORY_FILE);
     }
     

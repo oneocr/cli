@@ -19,6 +19,7 @@ import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import xyz.jphil.win11_oneocr.tools.*;
+import xyz.jphil.win11_oneocr.tools.improve.*;
 import static xyz.jphil.win11_oneocr.tools.PagedOcrData.*;
 
 /**
@@ -34,6 +35,19 @@ public class PdfOcrCommand implements Callable<Integer> {
 
     @picocli.CommandLine.ParentCommand
     private OcrTool parentCommand;
+    
+    // Interface for page progress callback
+    public interface PageProgressCallback {
+        void onPageCompleted(int pageNumber, long pageProcessingTimeMs);
+        void onFileStarted(String fileName, int totalPages, long fileSizeBytes);
+    }
+    
+    // Progress callback for folder mode integration
+    private PageProgressCallback pageProgressCallback;
+    
+    public void setPageProgressCallback(PageProgressCallback callback) {
+        this.pageProgressCallback = callback;
+    }
     
     private int getThreads() {
         return parentCommand != null ? parentCommand.getThreads() : 1;
@@ -65,6 +79,11 @@ public class PdfOcrCommand implements Callable<Integer> {
 
     @Option(names = {"--target-dpi"}, description = "Force specific DPI for all pages (bypasses auto-detection)")
     private Integer userTargetDpi;
+
+    @Mixin
+    private TessCliOptions tess = new TessCliOptions();
+
+    private ImproveOptions improveOptions;
     
     // PDF processing fields
     private int calculatedTargetDpi = 0;  // User-specified or calculated DPI for preview images
@@ -80,14 +99,18 @@ public class PdfOcrCommand implements Callable<Integer> {
                 return 1;
             }
 
+            // Validate the second-pass flags before spending a full OCR run on the document.
+            improveOptions = tess.enabled() ? tess.toOptions() : null;
+
             // Get PDF information (pages, dimensions, file size)
             pdfInfo = PdfInfoUtil.getPdfInfo(pdfFile);
             naming = new PdfNaming(pdfFile.getName(), pdfInfo.pageCount());
 
-            // Determine output directory
-            Path actualOutputDir = outputDir != null ? 
-                outputDir.toPath() : 
-                pdfFile.toPath().getParent().resolve(pdfFile.getName() + ".oneocr");
+            // Determine output directory. getParent() is null for a bare relative filename
+            // ("order.pdf"), so resolve against the absolute path rather than crashing.
+            Path actualOutputDir = outputDir != null ?
+                outputDir.toPath() :
+                pdfFile.toPath().toAbsolutePath().getParent().resolve(pdfFile.getName() + ".oneocr");
             
             Files.createDirectories(actualOutputDir);
 
@@ -98,12 +121,27 @@ public class PdfOcrCommand implements Callable<Integer> {
             log.debug("PDF", String.format("Size: %s / %d pages (budget: %s/page)",
                 formatBytes(pdfInfo.fileSize()), pdfInfo.pageCount(), formatBytes(pdfInfo.perPageAverageSize())));
 
-            // EARLY EXIT: Check if processing is already complete (skip expensive DPI analysis)
-            if (isProcessingComplete(actualOutputDir, pdfFile.getName())) {
+            // EARLY EXIT: Check if processing is already complete (skip expensive DPI analysis).
+            // Suppressed when a Tesseract pass is requested: the pass needs in-memory OCR results,
+            // so an already-processed document must be walked again rather than silently skipped.
+            if (improveOptions == null && isProcessingComplete(actualOutputDir, pdfFile.getName())) {
                 if (verbose) {
                     System.err.println("✅ Processing already complete - all pages processed!");
                 }
                 log.success("PDF", "Already completed, skipping DPI analysis and OCR processing");
+                
+                // Notify callback about already-completed file for proper page accumulation
+                // System.err.println("DEBUG: Already completed file - " + pdfFile.getName() + " - callback: " + (pageProgressCallback != null ? "SET" : "NULL")); // Debug removed
+                if (pageProgressCallback != null) {
+                    pageProgressCallback.onFileStarted(pdfFile.getName(), pdfInfo.pageCount(), pdfInfo.fileSize());
+                    // Report all pages as completed with 0ms processing time (they were skipped)
+                    // System.err.println("DEBUG: Reporting " + pdfInfo.pageCount() + " skipped pages"); // Debug removed
+                    for (int page = 1; page <= pdfInfo.pageCount(); page++) {
+                        pageProgressCallback.onPageCompleted(page, 0); // 0ms = skipped
+                    }
+                } else {
+                    System.err.println("WARNING: Cannot report pages for already-completed file - callback is null");
+                }
                 
                 // Return early - no need for progress tracking, DPI analysis, or OCR processing
                 System.out.println("Combined text file: " + pdfFile.getName() + ".oneocr.txt");
@@ -125,6 +163,11 @@ public class PdfOcrCommand implements Callable<Integer> {
                 }
             }
 
+            // Notify folder progress tracker if callback is set
+            if (pageProgressCallback != null) {
+                pageProgressCallback.onFileStarted(pdfFile.getName(), pdfInfo.pageCount(), pdfInfo.fileSize());
+            }
+
             // Step 2: Process PDF with progress tracking
             var progress = new ProgressTracker("PDF OCR Processing", pdfInfo.pageCount(), verbose);
             
@@ -137,9 +180,14 @@ public class PdfOcrCommand implements Callable<Integer> {
             
             progress.start();
             
+            System.err.printf("DEBUG DECISION: threads=%d, will call %s%n", getThreads(), 
+                (getThreads() == 1) ? "processWithParallelArchitecture" : "processWithMultiThreadedOcr");
+                
             List<PagedOcrResult> results = (getThreads() == 1) 
                 ? processWithParallelArchitecture(actualOutputDir, progress, log)
                 : processWithMultiThreadedOcr(actualOutputDir, progress, log);
+                
+            System.err.printf("DEBUG DECISION: processing completed, results.size()=%d%n", results.size());
             
             // Handle case where no new pages were processed
             if (results.isEmpty()) {
@@ -201,11 +249,15 @@ public class PdfOcrCommand implements Callable<Integer> {
 
             // Size matrix report removed - preview images now use simple calculated DPI
 
+            if (improveOptions != null && !results.isEmpty()) {
+                runTesseractPass(improveOptions, results, actualOutputDir, log);
+            }
+
             // Unregister from dual progress renderer if in folder mode
             if (pdfProgressId != null) {
                 DualProgressRenderer.unregister(pdfProgressId);
             }
-            
+
             progress.done();
             System.out.println("Combined text file: " + baseName + ".oneocr.txt");
             System.out.println("Combined XHTML file: " + baseName + ".oneocr.xhtml");
@@ -222,6 +274,75 @@ public class PdfOcrCommand implements Callable<Integer> {
         }
     }
 
+
+    /**
+     * Optional Tesseract second pass over the whole document. Pages are re-rendered at the
+     * requested DPI rather than reusing the OneOCR preview render, which is far too coarse for
+     * Tesseract; the saved line boxes are scaled by the width ratio. Originals are never touched -
+     * a parallel *.oneocr+tesseract.* set is written alongside them.
+     */
+    private void runTesseractPass(ImproveOptions opts, List<PagedOcrResult> results,
+                                  Path outputDir, LogFormatter log) {
+        try (var document = Loader.loadPDF(pdfFile);
+             var improver = new DocumentImprover(opts)) {
+            var renderer = new PDFRenderer(document);
+            log.step("TESS", "Second pass over low-confidence lines across " + results.size() + " page(s)");
+
+            var pages = new ArrayList<ImprovePage>();
+            for (var r : results) pages.add(new ImprovePage(r.pageNumber(), r.ocrResult(), r.imageWidth()));
+
+            var cache = new HashMap<Integer, BufferedImage>();
+            PageImageSupplier supplier = pageNo -> {
+                var img = cache.get(pageNo);
+                if (img == null) {
+                    img = renderer.renderImageWithDPI(pageNo - 1, opts.renderDpi, ImageType.RGB);
+                    cache.clear();               // one page at a time; 300 DPI pages are large
+                    cache.put(pageNo, img);
+                }
+                return img;
+            };
+
+            var improved = improver.improve(pages, supplier);
+            for (var line : improver.log()) log.debug("TESS", line);
+
+            var changed = improved.stream().filter(ImprovedPage::changed).toList();
+            if (changed.isEmpty()) {
+                log.success("TESS", "Nothing replaced; no second output written");
+                return;
+            }
+
+            var engine = OcrMetadata.ENGINE_ONEOCR_TESSERACT;
+            var paged = new ArrayList<PagedOcrResult>();
+            var replaced = 0;
+            for (var i = 0; i < improved.size(); i++) {
+                var imp = improved.get(i);
+                var src = results.get(i);
+                replaced += imp.bandsReplaced();
+                paged.add(new PagedOcrResult(imp.pageNo(), imp.result(), src.imageName(),
+                    src.imageWidth(), src.imageHeight()));
+                // Only pages that actually changed get a per-page file; an untouched page would
+                // just duplicate its OneOCR original. The combined output still covers every page.
+                if (!imp.changed()) continue;
+                var pageTxt = outputDir.resolve(EngineNaming.improved(naming.page(imp.pageNo(), "txt")));
+                var pageXhtml = outputDir.resolve(EngineNaming.improved(naming.page(imp.pageNo(), "xhtml")));
+                Files.writeString(pageTxt, imp.result().text());
+                Files.writeString(pageXhtml, OcrToSemanticXHtml.toXHtml(imp.result(),
+                    src.imageName(), src.imageWidth(), src.imageHeight(), engine));
+            }
+
+            Files.writeString(outputDir.resolve(EngineNaming.improved(naming.combined("txt"))),
+                paged.stream().map(p -> "=== Page " + p.pageNumber() + " ===\n" + p.ocrResult().text())
+                    .collect(java.util.stream.Collectors.joining("\n\n")));
+            Files.writeString(outputDir.resolve(EngineNaming.improved(naming.combined("xhtml"))),
+                OcrToSemanticXHtml.combineMultipleResults(paged, pdfFile.getName()));
+
+            log.success("TESS", String.format("Replaced %d line(s) on %d page(s) using %s",
+                replaced, changed.size(), String.join(", ", improver.detectedLangs())));
+        } catch (Exception e) {
+            System.err.println("Tesseract pass failed (OneOCR output is unaffected): " + e.getMessage());
+            if (verbose) e.printStackTrace();
+        }
+    }
 
     private List<PagedOcrResult> processWithParallelArchitecture(Path outputDir, ProgressTracker progress, LogFormatter log) throws Exception {
         List<PagedOcrResult> results = new ArrayList<>();
@@ -243,12 +364,26 @@ public class PdfOcrCommand implements Callable<Integer> {
             try {
                 for (int page = 0; page < pdfInfo.pageCount(); page++) {
                     int pageNum = page + 1;
+                    if (pageNum <= 3) { // Debug first few pages
+                        System.err.printf("DEBUG PARALLEL: Starting page %d processing%n", pageNum);
+                    }
                     
                     // Check if this page is already processed (resumability)
-                    if (allPageFilesExist(pdfName, pageNum, outputDir)) {
+                    // A Tesseract pass needs this page's OCR result in memory, so resume-skipping
+                    // it would leave the second pass with nothing to work on.
+                    if (improveOptions == null && allPageFilesExist(pdfName, pageNum, outputDir)) {
                         progress.inc();
+
+                        // Notify folder progress tracker about already-completed page
+                        if (pageProgressCallback != null) {
+                            pageProgressCallback.onPageCompleted(pageNum, 0); // 0ms processing time for skipped page
+                        }
+                        
                         continue;
                     }
+                    
+                    // Start timing for page processing
+                    long pageStartTimeMs = System.currentTimeMillis();
                     
                     // Render page to BufferedImage (in-memory, no disk I/O)
                     BufferedImage image = pdfRenderer.renderImageWithDPI(page, calculatedTargetDpi, ImageType.RGB);
@@ -287,6 +422,20 @@ public class PdfOcrCommand implements Callable<Integer> {
                     results.add(PagedOcrResult.from(pageOcrResult));
                     
                     progress.inc();
+                    
+                    // Notify folder progress tracker with page completion and timing
+                    if (pageProgressCallback != null) {
+                        long pageProcessingTimeMs = System.currentTimeMillis() - pageStartTimeMs;
+                        if (pageNum <= 5) { // Debug first 5 pages
+                            System.err.printf("DEBUG PDF: Calling onPageCompleted page=%d, time=%dms, callback=%s%n", 
+                                pageNum, pageProcessingTimeMs, (pageProgressCallback != null ? "SET" : "NULL"));
+                        }
+                        pageProgressCallback.onPageCompleted(pageNum, pageProcessingTimeMs);
+                    } else {
+                        if (pageNum <= 5) { // Debug missing callback
+                            System.err.printf("DEBUG PDF: pageProgressCallback is NULL for page %d%n", pageNum);
+                        }
+                    }
                     
                     // Background Thread: WebP Generation
                     final BufferedImage imageForWebP = image; // Final for lambda
@@ -363,73 +512,7 @@ public class PdfOcrCommand implements Callable<Integer> {
         return results;
     }
 
-    private List<PageOcrResult> processAllImages(List<PageImage> pageImages) throws Exception {
-        List<PageOcrResult> results = new ArrayList<>();
-        
-        // Initialize OCR once for all images
-        try (var ocrApi = new OneOcrApi()) {
-            var initOptions = ocrApi.createInitOptions();
-            var pipeline = ocrApi.createPipeline(initOptions);
-            var processOptions = ocrApi.createProcessOptions(maxLines);
-
-            System.out.printf("Processing %d pages with OCR...%n", pageImages.size());
-            
-            Instant startTime = Instant.now();
-            
-            for (int i = 0; i < pageImages.size(); i++) {
-                PageImage pageImage = pageImages.get(i);
-                Instant pageStartTime = Instant.now();
-                
-                // Load image and convert to BGRA
-                BufferedImage image = ImageIO.read(pageImage.imagePath().toFile());
-                byte[] bgraData = OcrTool.convertToBGRA(image);
-                
-                // Perform OCR
-                OcrResult result = ocrApi.recognizeImage(pipeline, processOptions, 
-                    image.getWidth(), image.getHeight(), bgraData);
-                
-                // Filter by confidence if specified
-                if (minConfidence > 0.0) {
-                    result = filterByConfidence(result, minConfidence);
-                }
-                
-                results.add(new PageOcrResult(pageImage.pageNumber(), result, pageImage));
-                
-                // Progress reporting
-                Instant pageEndTime = Instant.now();
-                Duration pageProcessingTime = Duration.between(pageStartTime, pageEndTime);
-                Duration totalElapsed = Duration.between(startTime, pageEndTime);
-                
-                // Calculate ETA
-                double avgTimePerPage = totalElapsed.toMillis() / (double)(i + 1);
-                int remainingPages = pageImages.size() - (i + 1);
-                Duration eta = Duration.ofMillis((long)(avgTimePerPage * remainingPages));
-                
-                // Show progress
-                double progressPercent = ((double)(i + 1) / pageImages.size()) * 100;
-                System.out.printf("  [%3.0f%%] Page %d/%d (%d words, %.1fs) - ETA: %s%n", 
-                    progressPercent,
-                    i + 1, 
-                    pageImages.size(),
-                    result.lines().stream().mapToInt(l -> l.words().size()).sum(),
-                    pageProcessingTime.toMillis() / 1000.0,
-                    formatDuration(eta));
-            }
-            
-            Duration totalTime = Duration.between(startTime, Instant.now());
-            System.out.printf("OCR processing completed in %s (avg %.1fs/page)%n", 
-                formatDuration(totalTime),
-                totalTime.toMillis() / 1000.0 / pageImages.size());
-
-            // Cleanup
-            processOptions.close();
-            pipeline.close();
-            initOptions.close();
-        }
-        
-        return results;
-    }
-
+    
     private void combineTxtResults(List<PageOcrResult> results, Path outputFile) throws Exception {
         StringBuilder combined = new StringBuilder();
         
@@ -520,19 +603,6 @@ public class PdfOcrCommand implements Callable<Integer> {
         if (bytes < 1024 * 1024) return String.format("%.1fKB", bytes / 1024.0);
         return String.format("%.1fMB", bytes / (1024.0 * 1024.0));
     }
-    
-    /**
-     * Check if a class is present in the classpath
-     */
-    private boolean isClassPresent(String className) {
-        try {
-            Class.forName(className);
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
-    
     /**
      * Atomic file write using temp+rename pattern
      */
@@ -607,55 +677,6 @@ public class PdfOcrCommand implements Callable<Integer> {
         }
     }
 
-    private int analyzeNativeDpi(PDDocument document, int pageIndex) {
-        try {
-            PDPage page = document.getPage(pageIndex);
-            PDResources resources = page.getResources();
-            
-            if (resources == null) {
-                return 150; // Default for text-only pages
-            }
-            
-            // Get page dimensions in points (1/72 inch)
-            float pageWidthInches = page.getBBox().getWidth() / 72f;
-            float pageHeightInches = page.getBBox().getHeight() / 72f;
-            
-            int maxDpi = 150; // Default minimum for text clarity
-            
-            // Analyze all XObject images on the page
-            for (var name : resources.getXObjectNames()) {
-                PDXObject xObject = resources.getXObject(name);
-                if (xObject instanceof PDImageXObject imageXObject) {
-                    // Calculate effective DPI based on image size vs display size
-                    int imageWidth = imageXObject.getWidth();
-                    int imageHeight = imageXObject.getHeight();
-                    
-                    // Estimate DPI (assuming image covers most of the page)
-                    int dpiX = Math.round(imageWidth / pageWidthInches);
-                    int dpiY = Math.round(imageHeight / pageHeightInches);
-                    int imageDpi = Math.max(dpiX, dpiY);
-                    
-                    maxDpi = Math.max(maxDpi, imageDpi);
-                    
-                    if (verbose) {
-                        System.err.printf("  Found image: %dx%d → ~%d DPI%n", 
-                            imageWidth, imageHeight, imageDpi);
-                    }
-                }
-            }
-            
-            // Cap at reasonable maximum
-            return Math.min(maxDpi, 300);
-            
-        } catch (Exception e) {
-            if (verbose) {
-                System.err.println("  Warning: Could not analyze native DPI: " + e.getMessage());
-            }
-            return 200; // Safe fallback
-        }
-    }
-
-
     /**
      * EXPERIMENTAL Multi-threaded OCR processing - distributes pages across multiple OCR worker threads
      * 
@@ -705,19 +726,28 @@ public class PdfOcrCommand implements Callable<Integer> {
             final int workerId = threadId;
             
             Future<Void> task = ocrExecutor.submit(() -> {
+                System.err.printf("DEBUG MT-START: Worker %d starting, pageQueue.size()=%d%n", workerId, pageQueue.size());
                 String pdfName = pdfFile.getName();
                 
                 // Initialize OCR INSIDE worker thread (thread-local requirement)
                 try (var api = new OneOcrApi()) {
+                    System.err.printf("DEBUG MT-OCR: Worker %d OCR initialized successfully%n", workerId);
                     var initOptions = api.createInitOptions();
                     var pipeline = api.createPipeline(initOptions);
                     var processOptions = api.createProcessOptions(maxLines);
                     
                     try {
                         // Process pages from the queue using thread-local OCR instance
+                        System.err.printf("DEBUG MT-LOOP: Worker %d entering page processing loop%n", workerId);
                         Integer page;
+                        int pagesProcessed = 0;
                         while ((page = pageQueue.poll()) != null) {
+                            pagesProcessed++;
+                            System.err.printf("DEBUG MT-POLL: Worker %d got page %d (total processed: %d)%n", workerId, page + 1, pagesProcessed);
                             int pageNum = page + 1;
+                            if (pageNum <= 3) { // Debug first few pages
+                                System.err.printf("DEBUG MT-WORKER: Processing page %d in worker %d%n", pageNum, workerId);
+                            }
                             
                             try {
                                 // Check if already processed (resumability)
@@ -725,6 +755,9 @@ public class PdfOcrCommand implements Callable<Integer> {
                                     progress.inc();
                                     continue;
                                 }
+                                
+                                // Start timing for page processing
+                                long pageStartTimeMs = System.currentTimeMillis();
                                 
                                 // Render page to image (thread-safe PDFBox operation)
                                 BufferedImage image;
@@ -764,6 +797,20 @@ public class PdfOcrCommand implements Callable<Integer> {
                             
                             // Update progress (thread-safe)
                             progress.inc();
+                            
+                            // Notify folder progress tracker with page completion and timing
+                            if (pageProgressCallback != null) {
+                                long pageProcessingTimeMs = System.currentTimeMillis() - pageStartTimeMs;
+                                if (pageNum <= 5) { // Debug first 5 pages
+                                    System.err.printf("DEBUG PDF-MT: Calling onPageCompleted page=%d, time=%dms, callback=%s%n", 
+                                        pageNum, pageProcessingTimeMs, (pageProgressCallback != null ? "SET" : "NULL"));
+                                }
+                                pageProgressCallback.onPageCompleted(pageNum, pageProcessingTimeMs);
+                            } else {
+                                if (pageNum <= 5) { // Debug missing callback
+                                    System.err.printf("DEBUG PDF-MT: pageProgressCallback is NULL for page %d%n", pageNum);
+                                }
+                            }
                             
                         } catch (Exception e) {
                             progress.err(String.format("Page %d failed: %s", pageNum, e.getMessage()));

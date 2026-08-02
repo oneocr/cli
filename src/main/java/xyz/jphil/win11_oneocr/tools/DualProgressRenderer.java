@@ -37,6 +37,10 @@ public class DualProgressRenderer {
         activeTrackers.remove(id);
     }
     
+    public static ProgressTracker getTracker(String id) {
+        return activeTrackers.get(id);
+    }
+    
     /**
      * Render all active progress bars simultaneously.
      * Called whenever any progress bar needs to update.

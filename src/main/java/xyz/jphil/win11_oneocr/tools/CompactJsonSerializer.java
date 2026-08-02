@@ -21,11 +21,15 @@ public class CompactJsonSerializer {
      * @return Compact single-line JSON string
      */
     public static String toCompactJson(OcrResult result, String imageFile, int imageWidth, int imageHeight) {
+        return toCompactJson(result, imageFile, imageWidth, imageHeight, OcrMetadata.ENGINE_ONEOCR);
+    }
+
+    public static String toCompactJson(OcrResult result, String imageFile, int imageWidth, int imageHeight, String engine) {
         var root = new JSONObject();
-        
+
         // Create metadata record
-        var metadata = OcrMetadata.create(imageFile, imageWidth, imageHeight, result);
-        
+        var metadata = OcrMetadata.create(imageFile, imageWidth, imageHeight, result, engine);
+
         var metrics = new JSONObject()
             .put("linesCount", metadata.metrics().linesCount())
             .put("wordsCount", metadata.metrics().wordsCount())
@@ -39,6 +43,7 @@ public class CompactJsonSerializer {
         var meta = new JSONObject()
         .put("file", metadata.file())
         .put("imgSize", metadata.width()+"x"+metadata.height())
+        .put("engine", metadata.engine())
         .put("timestampUTCISO", metadata.timestampUTCISO())
         // .put("plainText", result.text()) // Commented out to reduce file size - didn't improve AI comprehension
         .put("metrics", metrics);
@@ -197,11 +202,15 @@ public class CompactJsonSerializer {
             .reduce("", (a, b) -> a.isEmpty() ? b : a + "\n" + b);
         var result = new OcrResult(fullText, angle, lines);
         
+        // 'plainText' is deliberately not written out (it duplicates the reconstructed text and
+        // bloats the file), so it must be read optionally - reading it as required threw on
+        // every round-trip and made saved JSON unloadable.
         var metadata = new OcrMetadata(
-            metaJson.getString("file"),
+            metaJson.optString("file", ""),
             imgWidth, imgHeight,
-            metaJson.getString("timestampUTCISO"),
-            metaJson.getString("text"),
+            metaJson.optString("timestampUTCISO", ""),
+            metaJson.optString("plainText", result.text()),
+            metaJson.optString("engine", OcrMetadata.ENGINE_ONEOCR),
             new OcrMetrics(result)
         );
         return new OcrJsonFile(metadata, result);

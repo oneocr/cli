@@ -2,12 +2,12 @@ package xyz.jphil.win11_oneocr.tools.pdf;
 
 public class PdfNaming {
     private final String name;
-    private final int total;
+    //private final int total;
     private final String fmt;
     
     public PdfNaming(String pdfName, int totalPages) {
         this.name = pdfName;
-        this.total = totalPages;
+        int total = totalPages;
         int digits = totalPages <= 0 ? 1 : Math.max(1, (int) Math.floor(Math.log10(totalPages)) + 1);
         this.fmt = String.format("%%0%dd", digits);
     }
