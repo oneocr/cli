@@ -9,6 +9,7 @@ import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 import xyz.jphil.win11_oneocr.*;
 import xyz.jphil.win11_oneocr.tools.improve.*;
+import xyz.jphil.win11_oneocr.tools.layout.*;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -26,7 +27,7 @@ import xyz.jphil.windows_console_set_unicode_output.WindowsConsoleSetUnicodeOutp
     mixinStandardHelpOptions = true, 
     version = "1.0",
     description = "Windows 11 OneOCR command-line tool - Extract text from images using Windows built-in OCR",
-    subcommands = {PdfOcrCommand.class, FolderOcrCommand.class, UiCommand.class}
+    subcommands = {PdfOcrCommand.class, FolderOcrCommand.class, UiCommand.class, LayoutCommand.class}
 )
 public class OcrTool implements Callable<Integer> {
 
@@ -68,6 +69,9 @@ public class OcrTool implements Callable<Integer> {
 
     @CommandLine.Mixin
     private TessCliOptions tess = new TessCliOptions();
+
+    @CommandLine.Mixin
+    private LayoutCliOptions layout = new LayoutCliOptions();
 
     public int getThreads() {
         return threads;
@@ -194,9 +198,12 @@ public class OcrTool implements Callable<Integer> {
             File actualXhtmlFile = xhtmlFile;
             File actualSvgFile = svgFile;
             
-            if (!noDefaults && actualJsonFile == null && actualXhtmlFile == null && actualTextFile == null) {
-                actualJsonFile = getDefaultOutputFile("json");
-                actualXhtmlFile = getDefaultOutputFile("xhtml");
+            // actualTextFile is already non-null here whenever defaults are on (see just above), so
+            // testing it made this branch unreachable and single-image mode silently produced no
+            // .json and no .xhtml — the format that carries per-word confidence and bounds.
+            if (!noDefaults) {
+                if (actualJsonFile == null) actualJsonFile = getDefaultOutputFile("json");
+                if (actualXhtmlFile == null) actualXhtmlFile = getDefaultOutputFile("xhtml");
             }
             
             if (svgFile != null || (!noDefaults && svgFile == null)) {
@@ -219,7 +226,10 @@ public class OcrTool implements Callable<Integer> {
                 generateSvg(result, actualSvgFile, image.getWidth(), image.getHeight());
                 log.success("SVG", "Saved: " + actualSvgFile.getName());
             }
-            
+            if (layout.enabled()) {
+                outputLayout(result, image.getWidth(), image.getHeight(), getDefaultOutputFile("txt"), log);
+            }
+
             // Fallback to stdout if no outputs specified
             if (outputFile == null && actualTextFile == null && actualJsonFile == null &&
                 actualXhtmlFile == null && actualSvgFile == null) {
@@ -285,12 +295,26 @@ public class OcrTool implements Callable<Integer> {
                 OcrToSemanticXHtml.toXHtml(page.result(), name, w, h, engine));
             if (svg != null) Files.writeString(improvedSibling(svg).toPath(),
                 SvgVisualizer.createSvgVisualization(page.result(), inputFile.toPath(), w, h));
+            if (layout.enabled())
+                outputLayout(page.result(), w, h, improvedSibling(getDefaultOutputFile("txt")), log);
             log.success("TESS", String.format("Replaced %d of %d flagged line(s) using %s",
                 page.bandsReplaced(), page.bandsFlagged(), String.join("+", page.langsUsed())));
         } catch (Exception e) {
             System.err.println("Tesseract pass failed (OneOCR output is unaffected): " + e.getMessage());
             if (verbose) e.printStackTrace();
         }
+    }
+
+    /** Layout-aware exports, named against the plain text output: *.oneocr.layout.{txt,html}. */
+    private void outputLayout(OcrResult result, int width, int height, File base, LogFormatter log) throws Exception {
+        var name = inputFile.toPath().getFileName().toString();
+        var pages = PageLayout.single(result, name, width, height, layout.options());
+        var txt = LayoutExport.sibling(base.getAbsoluteFile(), "txt").toPath();
+        var html = layout.noLayoutHtml ? null : LayoutExport.sibling(base.getAbsoluteFile(), "html").toPath();
+        LayoutExport.write(pages, name, txt, html, layout.mode());
+        log.success("LAYOUT", "Text: " + txt.getFileName()
+            + (html == null ? "" : "  HTML: " + html.getFileName()));
+        if (verbose) System.err.println(LayoutReport.of(pages.get(0)));
     }
 
     private void outputPlainText(OcrResult result, File textFile, LogFormatter log) throws Exception {

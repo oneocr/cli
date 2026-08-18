@@ -16,6 +16,9 @@ import xyz.jphil.win11_oneocr.tools.OcrTool;
 import xyz.jphil.win11_oneocr.tools.ProgressTracker;
 import xyz.jphil.win11_oneocr.tools.ProgressAwareLogFormatter;
 import xyz.jphil.win11_oneocr.tools.folder.FileProcessor.FileType;
+import xyz.jphil.win11_oneocr.tools.layout.LayoutCliOptions;
+import xyz.jphil.win11_oneocr.tools.layout.LayoutExport;
+import xyz.jphil.win11_oneocr.tools.layout.PageLayout;
 
 /**
  * Folder OCR processing subcommand for OcrTool
@@ -30,8 +33,11 @@ public class FolderOcrCommand implements Callable<Integer> {
 
     @picocli.CommandLine.ParentCommand
     private OcrTool parentCommand;
-    
-    
+
+    @picocli.CommandLine.Mixin
+    private LayoutCliOptions layout = new LayoutCliOptions();
+
+
     @Parameters(
         index = "0", 
         description = "Input folder containing images and/or PDFs"
@@ -273,7 +279,16 @@ public class FolderOcrCommand implements Callable<Integer> {
                 var svgFile = createOutputPath(file, outputPath, ".oneocr.svg");
                 // TODO: Add SVG generation if needed
             }
-            
+
+            if (layout.enabled()) {
+                var name = file.getFileName().toString();
+                var pages = PageLayout.single(result, name, image.getWidth(), image.getHeight(), layout.options());
+                var layoutTxt = createOutputPath(file, outputPath, ".oneocr.layout.txt");
+                var layoutHtml = layout.noLayoutHtml ? null
+                    : createOutputPath(file, outputPath, ".oneocr.layout.html");
+                LayoutExport.write(pages, name, layoutTxt, layoutHtml, layout.mode());
+            }
+
             log.success("IMAGE", String.format("Completed: %s (%d chars)", 
                 file.getFileName(), text.length()));
             return true;
@@ -292,8 +307,10 @@ public class FolderOcrCommand implements Callable<Integer> {
             // Create the output directory preserving relative path structure
             var pdfOutputDir = createOutputPath(file, outputPath, ".oneocr");
             
-            // EARLY EXIT: Check if PDF processing is already complete (skip expensive operations)
-            if (isPdfProcessingComplete(file, pdfOutputDir)) {
+            // EARLY EXIT: Check if PDF processing is already complete (skip expensive operations).
+            // Suppressed for --layout, which re-renders from the saved boxes and so is cheap even on
+            // a finished document; PdfOcrCommand has its own resume path that covers it.
+            if (!layout.enabled() && isPdfProcessingComplete(file, pdfOutputDir)) {
                 log.success("PDF", "Already completed: " + file.getFileName());
                 
                 // IMPORTANT: Report pages for already-completed files to folder progress tracker
@@ -335,7 +352,14 @@ public class FolderOcrCommand implements Callable<Integer> {
             if (verbose) {
                 pdfArgsList.add("--verbose");
             }
-            
+
+            if (layout.enabled()) {
+                pdfArgsList.add("--layout");
+                pdfArgsList.add("--layout-text");
+                pdfArgsList.add(layout.mode().name().toLowerCase());
+                if (layout.noLayoutHtml) pdfArgsList.add("--no-layout-html");
+            }
+
             // Note: --threads is a global parameter handled by the parent command,
             // not passed directly to PDF subcommand. The PdfOcrCommand will get
             // the threads value through @ParentCommand annotation.

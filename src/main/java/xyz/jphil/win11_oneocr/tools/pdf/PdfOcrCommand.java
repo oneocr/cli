@@ -20,6 +20,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import xyz.jphil.win11_oneocr.tools.*;
 import xyz.jphil.win11_oneocr.tools.improve.*;
+import xyz.jphil.win11_oneocr.tools.layout.*;
 import static xyz.jphil.win11_oneocr.tools.PagedOcrData.*;
 
 /**
@@ -83,6 +84,9 @@ public class PdfOcrCommand implements Callable<Integer> {
     @Mixin
     private TessCliOptions tess = new TessCliOptions();
 
+    @Mixin
+    private LayoutCliOptions layout = new LayoutCliOptions();
+
     private ImproveOptions improveOptions;
     
     // PDF processing fields
@@ -143,6 +147,12 @@ public class PdfOcrCommand implements Callable<Integer> {
                     System.err.println("WARNING: Cannot report pages for already-completed file - callback is null");
                 }
                 
+                // The layout export works purely off the saved boxes, so a finished document can be
+                // re-rendered (or re-tuned) without re-running OCR.
+                if (layout.enabled())
+                    writeLayout(actualOutputDir.resolve(naming.range(1, pdfInfo.pageCount(), "xhtml")),
+                        actualOutputDir, naming.combined("layout.txt"), log);
+
                 // Return early - no need for progress tracking, DPI analysis, or OCR processing
                 System.out.println("Combined text file: " + pdfFile.getName() + ".oneocr.txt");
                 System.out.println("Combined XHTML file: " + pdfFile.getName() + ".oneocr.xhtml");
@@ -247,6 +257,10 @@ public class PdfOcrCommand implements Callable<Integer> {
                 Files.copy(finalMergedXhtml, outputXhtml, StandardCopyOption.REPLACE_EXISTING);
             }
 
+            if (layout.enabled() && Files.exists(outputXhtml)) {
+                writeLayout(outputXhtml, actualOutputDir, naming.combined("layout.txt"), log);
+            }
+
             // Size matrix report removed - preview images now use simple calculated DPI
 
             if (improveOptions != null && !results.isEmpty()) {
@@ -274,6 +288,28 @@ public class PdfOcrCommand implements Callable<Integer> {
         }
     }
 
+
+    /**
+     * Recovers the page layout from the boxes already saved in the semantic XHTML and writes the
+     * reading copies beside it. Working off the file rather than off memory means this covers the
+     * resumed case too, where no page was re-OCR'd at all.
+     */
+    private void writeLayout(Path sourceXhtml, Path outputDir, String textName, LogFormatter log) {
+        try {
+            if (!Files.exists(sourceXhtml)) return;
+            var pages = OcrXHtmlReader.read(Files.readString(sourceXhtml));
+            if (pages.isEmpty()) return;
+            var analysed = LayoutExport.analyze(pages, layout.options());
+            var txt = outputDir.resolve(textName);
+            var html = layout.noLayoutHtml ? null : outputDir.resolve(LayoutExport.name(textName, "html"));
+            LayoutExport.write(analysed, pdfFile.getName(), txt, html, layout.mode());
+            log.success("LAYOUT", "Text: " + txt.getFileName()
+                + (html == null ? "" : "  HTML: " + html.getFileName()));
+        } catch (Exception e) {
+            System.err.println("Layout export failed (other output is unaffected): " + e.getMessage());
+            if (verbose) e.printStackTrace();
+        }
+    }
 
     /**
      * Optional Tesseract second pass over the whole document. Pages are re-rendered at the
@@ -335,6 +371,10 @@ public class PdfOcrCommand implements Callable<Integer> {
                     .collect(java.util.stream.Collectors.joining("\n\n")));
             Files.writeString(outputDir.resolve(EngineNaming.improved(naming.combined("xhtml"))),
                 OcrToSemanticXHtml.combineMultipleResults(paged, pdfFile.getName()));
+
+            if (layout.enabled())
+                writeLayout(outputDir.resolve(EngineNaming.improved(naming.combined("xhtml"))),
+                    outputDir, LayoutExport.name(EngineNaming.improved(naming.combined("txt")), "txt"), log);
 
             log.success("TESS", String.format("Replaced %d line(s) on %d page(s) using %s",
                 replaced, changed.size(), String.join(", ", improver.detectedLangs())));
