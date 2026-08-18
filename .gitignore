@@ -109,3 +109,8 @@ test-logs
 *.oneocr.svg
 *.oneocr.txt
 # Keep ocr-book.jpg for testing
+# PRPs live in the organisation-level prp folder (C:\user\code\oneocr\prp), out of every repository history
+prp/
+
+# stale classpath dump from mvn dependency:build-classpath
+cp.txt

@@ -3,7 +3,7 @@
 Command-line tools and output formatters for Windows 11 OneOCR using Java FFM (Foreign Function & Memory API).
 
 ## Requirements
-- **API**: [xyz-jphil-win11_oneocr-api](https://github.com/xyz-jphil/xyz-jphil-win11_oneocr-api)
+- **API**: [oneocr-api](https://github.com/oneocr/api)
 - **JDK 22+** (recommended) or JDK 21 with `--enable-preview` for runtime
 - Windows 11
 
@@ -15,19 +15,19 @@ mvn clean package
 ## Usage
 ```bash
 # Basic OCR - generates all formats by default (JSON, XHTML, SVG, TXT)
-java --enable-native-access=ALL-UNNAMED -jar target/xyz-jphil-win11_oneocr-tools-1.0.jar image.jpg
+java --enable-native-access=ALL-UNNAMED -jar target/1ocr-2.0.jar image.jpg
 
 # Verbose mode with informative output
-java --enable-native-access=ALL-UNNAMED -jar target/xyz-jphil-win11_oneocr-tools-1.0.jar -v image.jpg
+java --enable-native-access=ALL-UNNAMED -jar target/1ocr-2.0.jar -v image.jpg
 
 # Custom output files
-java --enable-native-access=ALL-UNNAMED -jar target/xyz-jphil-win11_oneocr-tools-1.0.jar --json output.json --svg output.svg --xhtml output.xhtml --text output.txt image.jpg 
+java --enable-native-access=ALL-UNNAMED -jar target/1ocr-2.0.jar --json output.json --svg output.svg --xhtml output.xhtml --text output.txt image.jpg 
 
 # Only specific formats (disable defaults)
-java --enable-native-access=ALL-UNNAMED -jar target/xyz-jphil-win11_oneocr-tools-1.0.jar --no-defaults --xhtml document.xhtml image.jpg
+java --enable-native-access=ALL-UNNAMED -jar target/1ocr-2.0.jar --no-defaults --xhtml document.xhtml image.jpg
 
 # Confidence filtering and verbose output
-java --enable-native-access=ALL-UNNAMED -jar target/xyz-jphil-win11_oneocr-tools-1.0.jar --min-confidence 0.8 --verbose image.jpg 
+java --enable-native-access=ALL-UNNAMED -jar target/1ocr-2.0.jar --min-confidence 0.8 --verbose image.jpg 
 ```
 
 ### Default Output Files
@@ -54,15 +54,15 @@ When no specific output files are specified, the tool generates:
 - To use this, you must first build the api module. We DO NOT provide pre-build jars or exes.
 
 ## Related Projects
-- **API Module**: [xyz-jphil-win11_oneocr-api](https://github.com/xyz-jphil/xyz-jphil-win11_oneocr-api) - Core Java FFM bindings and native libraries
-- **XHTML Presentation**: [win11_oneocr_semantic_xhtml](https://github.com/xyz-jphil/win11_oneocr_semantic_xhtml) - Interactive CSS/JS for XHTML format
+- **API Module**: [oneocr-api](https://github.com/oneocr/api) - Core Java FFM bindings and native libraries
+- **XHTML Presentation**: [semantic_xhtml](https://github.com/oneocr/semantic_xhtml) - Interactive CSS/JS for XHTML format
 - **Original Research**: [win11-oneocr](https://github.com/b1tg/win11-oneocr) - Initial reverse engineering of Windows 11 OneOCR
 
 ## Project Ecosystem
 ```
-xyz-jphil-win11_oneocr-api (Core FFM bindings)
+oneocr-api (Core FFM bindings)
     ↓
-xyz-jphil-win11_oneocr-tools (Command-line tools) → Generates XHTML
+oneocr-cli (Command-line tools) → Generates XHTML
     ↓
-win11_oneocr_semantic_xhtml (Presentation layer) → Renders XHTML
+semantic_xhtml (Presentation layer) → Renders XHTML
 ```

@@ -4,9 +4,9 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.xyz-jphil</groupId>
-    <artifactId>xyz-jphil-win11_oneocr-tools</artifactId>
-    <version>1.0</version>
+    <groupId>io.github.oneocr</groupId>
+    <artifactId>oneocr-cli</artifactId>
+    <version>2.0</version>
 
     <properties>
         <maven.compiler.source>22</maven.compiler.source>
@@ -17,16 +17,16 @@
     <dependencies>
         <!-- Depend on the API module -->
         <dependency>
-            <groupId>io.github.xyz-jphil</groupId>
-            <artifactId>xyz-jphil-win11_oneocr-api</artifactId>
-            <version>1.0</version>
+            <groupId>io.github.oneocr</groupId>
+            <artifactId>oneocr-api</artifactId>
+            <version>2.0</version>
         </dependency>
         
         <!-- Optional Tesseract second pass for Indic scripts OneOCR cannot read -->
         <dependency>
-            <groupId>io.github.xyz-jphil</groupId>
-            <artifactId>xyz-jphil-win11_oneocr-tesseract</artifactId>
-            <version>1.0</version>
+            <groupId>io.github.oneocr</groupId>
+            <artifactId>oneocr-tesseract</artifactId>
+            <version>2.0</version>
         </dependency>
 
         <!-- Pico CLI for command line interface -->
@@ -120,6 +120,9 @@
     </dependencies>
 
     <build>
+        <!-- The command this jar installs is 1ocr, so the jar is named for the command, not the artifact -->
+        <finalName>1ocr-${project.version}</finalName>
+
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -143,7 +146,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.2</version>
                 <configuration>
-                    <argLine>--enable-native-access=ALL-UNNAMED,xyz.jphil.win11_oneocr,xyz.jphil.windows_console_set_unicode_output</argLine>
+                    <argLine>--enable-native-access=ALL-UNNAMED,oneocr.api,xyz.jphil.windows_console_set_unicode_output</argLine>
                 </configuration>
             </plugin>
             
@@ -161,7 +164,7 @@
                         <configuration>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>xyz.jphil.win11_oneocr.tools.OcrTool</mainClass>
+                                    <mainClass>oneocr.cli.OcrTool</mainClass>
                                 </transformer>
                                 <!-- CRITICAL: Merge ImageIO service provider files (META-INF/services/*) for JPEG2000 support.
                                      Without this, jai-imageio-jpeg2000 plugin won't be discovered at runtime in shaded JAR,
