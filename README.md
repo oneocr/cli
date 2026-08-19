@@ -1,6 +1,18 @@
-# Windows 11 OneOCR Tools
+<p align="center">
+  <a href="https://oneocr.github.io/"><img src="https://oneocr.github.io/assets/mark.svg" width="76" height="76" alt="oneocr"></a>
+</p>
 
-Command-line tools and output formatters for Windows 11 OneOCR using Java FFM (Foreign Function & Memory API).
+<h1 align="center">oneocr-cli</h1>
+
+<p align="center">The <code>1ocr</code> command — images, PDFs and whole folders to text, JSON, SVG and semantic XHTML.</p>
+
+<p align="center">
+  <a href="https://oneocr.github.io/">Website</a> ·
+  <a href="https://github.com/oneocr">All repositories</a> ·
+  <a href="https://oneocr.github.io/demo/sample-page.oneocr.xhtml">Live output</a>
+</p>
+
+---
 
 ## Requirements
 - **API**: [oneocr-api](https://github.com/oneocr/api)
