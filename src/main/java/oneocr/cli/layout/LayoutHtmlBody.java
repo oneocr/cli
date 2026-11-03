@@ -66,7 +66,7 @@ public final class LayoutHtmlBody {
     private Frag_I<?> gridTable(LayoutGrid grid) {
         var widths = grid.widthPercents();
         var cols = new ArrayList<Frag_I<?>>();
-        for (var w : widths) cols.add(col(style("width:" + pct(w) + "%")));
+        for (var w : widths) cols.add(col(styleAttr("width:" + pct(w) + "%")));
 
         var tol = o.alignTolEm() * em;
         var rows = new ArrayList<Frag_I<?>>();
