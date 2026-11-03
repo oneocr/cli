@@ -75,14 +75,14 @@ public final class LayoutHtmlBody {
             if (filled.size() == 1) {
                 var only = filled.get(0);
                 rows.add(tr(td(colspan(String.valueOf(row.size())),
-                    style("text-align:" + Align.of(only.rect(), grid.bounds(), tol).css()),
+                    styleAttr("text-align:" + Align.of(only.rect(), grid.bounds(), tol).css()),
                     text(only.text()))));
                 continue;
             }
             var cells = new ArrayList<Frag_I<?>>();
             for (var i = 0; i < row.size(); i++) {
                 var align = grid.alignments().get(i);
-                cells.add(row.get(i).empty() ? td() : td(style("text-align:" + align.css()), text(row.get(i).text())));
+                cells.add(row.get(i).empty() ? td() : td(styleAttr("text-align:" + align.css()), text(row.get(i).text())));
             }
             rows.add(tr(frags(cells)));
         }
@@ -97,7 +97,7 @@ public final class LayoutHtmlBody {
         for (var i = 0; i < row.size(); i++) {
             if (i > 0) spans.add(LiteralText.tab());
             spans.add(E.span(
-                style("width:" + pct(widths[i]) + "%;text-align:" + grid.alignments().get(i).css()),
+                styleAttr("width:" + pct(widths[i]) + "%;text-align:" + grid.alignments().get(i).css()),
                 text(row.get(i).text())));
         }
         return p(class_("row"), frags(spans));
