@@ -154,6 +154,13 @@ public class OcrToSemanticXHtml {
      * Combine multiple OCR results from different pages into a single XHTML document
      */
     public static String combineMultipleResults(List<PagedOcrResult> pagedResults, String documentName) {
+        return combineMultipleResults(pagedResults, documentName, OcrMetadata.ENGINE_ONEOCR);
+    }
+
+    /**  engineName which backend read these pages, recorded so a quality difference between
+     *                   the two can be attributed later. The combined document did not carry this
+     *                   at all before, while every page-level one did. */
+    public static String combineMultipleResults(List<PagedOcrResult> pagedResults, String documentName, String engineName) {
         if (pagedResults.isEmpty()) {
             return "";
         }
@@ -259,7 +266,9 @@ public class OcrToSemanticXHtml {
                     meta(name("pagesCount"), content(String.valueOf(pagedResults.size()))),
                     meta(name("totalWords"), content(String.valueOf(totalWords))),
                     meta(name("totalSegments"), content(String.valueOf(totalSegments))),
-                    meta(name("averageConfidence"), content(formatConfidence(avgConfidence)))
+                    meta(name("averageConfidence"), content(formatConfidence(avgConfidence))),
+                    meta(name("engine"), content(engineName == null || engineName.isBlank()
+                            ? OcrMetadata.ENGINE_ONEOCR : engineName))
                 ),
                 body(
                     // this is a fallback style (if viewing offline)

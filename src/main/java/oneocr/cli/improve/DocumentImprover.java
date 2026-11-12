@@ -35,7 +35,15 @@ public final class DocumentImprover implements AutoCloseable {
         var flaggedByPage = new LinkedHashMap<Integer, List<LineBand>>();
         for (var p : pages) {
             var bands = BandMerger.merge(p.result(), o);
-            var flagged = bands.stream().filter(LineBand::suspect).toList();
+            var flagged = new ArrayList<>(bands.stream().filter(LineBand::suspect).toList());
+            if (o.detectCoverageGaps) {
+                var page = images.image(p.pageNo());
+                var scale = page.getWidth() / (double) Math.max(1, p.ocrImageWidth());
+                var gaps = GapBandFinder.find(page, p.result(), scale, o);
+                if (!gaps.isEmpty()) log.add("p" + p.pageNo() + ": " + gaps.size() + " coverage gap(s) found"
+                    + (gaps.size() >= o.gapMaxBandsPerPage ? " (hit the per-page cap - likely noise, e.g. a watermark; check this page)" : ""));
+                flagged.addAll(gaps);
+            }
             if (!flagged.isEmpty()) flaggedByPage.put(p.pageNo(), flagged);
         }
 
@@ -70,18 +78,23 @@ public final class DocumentImprover implements AutoCloseable {
         var scale = page.getWidth() / (double) Math.max(1, p.ocrImageWidth());
         var replacements = new HashMap<Integer, OcrLine>();
         var drop = new HashSet<Integer>();
+        var inserted = new ArrayList<OcrLine>();
         var used = new LinkedHashSet<String>();
         var replaced = 0;
 
         for (var band : flagged) {
+            var isGap = band.lineIndices().isEmpty();
             var crop = BandCropper.crop(page, band, scale, o);
-            var lang = specFor(crop);
-            if (lang == null) continue;
-            var res = pool.recognizeSpec(crop, lang);
-            if (res.isBlank()) continue;
-            var origin = BandCropper.origin(page, band, scale, o);
-            var line = toOcrLine(res, origin, scale, o.whiteBorderPx);
-            if (line.words().isEmpty()) continue;
+            var lang = specFor(crop, isGap);
+            var line = lang == null ? null : lineFor(crop, lang, page, band, scale, isGap);
+            if (isGap) {
+                // a coverage gap: no original OneOCR line to fall back to, so a failed read
+                // must still leave a visible marker rather than silently losing the text.
+                inserted.add(line != null ? line : placeholder(page, band, scale));
+                if (line != null) { used.add(lang); replaced++; }
+                continue;
+            }
+            if (line == null) continue;
             replacements.put(band.firstLine(), line);
             for (var i : band.lineIndices()) {
                 if (i != band.firstLine()) drop.add(i);
@@ -90,8 +103,26 @@ public final class DocumentImprover implements AutoCloseable {
             replaced++;
         }
 
-        return new ImprovedPage(p.pageNo(), splice(p.result(), replacements, drop),
+        return new ImprovedPage(p.pageNo(), splice(p.result(), replacements, drop, inserted),
             flagged.size(), replaced, List.copyOf(used));
+    }
+
+    private OcrLine lineFor(BufferedImage crop, String lang, BufferedImage page, LineBand band, double scale, boolean isGap) throws IOException {
+        var res = pool.recognizeSpec(crop, lang);
+        if (res.isBlank()) return null;
+        if (isGap && res.meanConfidence() < o.gapMinRecognitionConfidence) return null;
+        var origin = BandCropper.origin(page, band, scale, o);
+        var line = toOcrLine(res, origin, scale, o.whiteBorderPx);
+        return line.words().isEmpty() ? null : line;
+    }
+
+    /** A visible marker for a coverage gap that could not be confidently read, so the text is
+     *  known to be missing rather than silently absent from the result. */
+    private static OcrLine placeholder(BufferedImage page, LineBand band, double scale) {
+        var x = band.x() / scale; var y = band.y() / scale;
+        var w = band.w() / scale; var h = band.h() / scale;
+        var box = new BoundingBox(x, y, x + w, y, x + w, y + h, x, y + h);
+        return new OcrLine("[unrecognized text region]", box, List.of());
     }
 
     /**
@@ -99,21 +130,28 @@ public final class DocumentImprover implements AutoCloseable {
      * a union set of three languages nearly doubles the error rate. Returns a literal Tesseract
      * language spec, or null when this band should be left exactly as OneOCR read it.
      *
-     * Every band is confirmed before replacement, even when the document's script is already
-     * resolved. The confidence guard that selects candidate lines also catches ordinary
+     * Every EXISTING OneOCR band is confirmed before replacement, even when the document's script
+     * is already resolved. The confidence guard that selects candidate lines also catches ordinary
      * low-confidence English - on the reference 25-page order, 45 of 49 flagged lines were such
      * false positives - and replacing those would swap OneOCR's better Latin for Tesseract's.
+     *
+     * A coverage-gap band skips that re-verification once a single script is resolved: there is
+     * no existing OneOCR text there to protect, so the only failure mode the guard exists to
+     * prevent cannot happen, and re-imposing it just drops real text that legitimately reads
+     * worse than the document-level average (a short or noisy crop, for instance).
      */
-    private String specFor(BufferedImage crop) throws IOException {
+    private String specFor(BufferedImage crop, boolean isGap) throws IOException {
         if (o.allCandidatesAtOnce) {
             var spec = o.allCandidatesSpec();
-            return pool.verifySpec(crop, spec, spec).accepted() ? spec : null;
+            return isGap ? spec : (pool.verifySpec(crop, spec, spec).accepted() ? spec : null);
         }
         if (o.probingDisabled()) {
-            return pool.verify(crop, o.forcedLang).accepted() ? TessLangs.with(o.forcedLang, o.baseLang) : null;
+            return isGap ? TessLangs.with(o.forcedLang, o.baseLang)
+                : (pool.verify(crop, o.forcedLang).accepted() ? TessLangs.with(o.forcedLang, o.baseLang) : null);
         }
         if (detectedLangs.size() == 1) {
             var lang = detectedLangs.get(0);
+            if (isGap) return TessLangs.with(lang, o.baseLang);
             return pool.verify(crop, lang).accepted() ? TessLangs.with(lang, o.baseLang) : null;
         }
         var vote = pool.probe(crop);
@@ -176,12 +214,21 @@ public final class DocumentImprover implements AutoCloseable {
         return new OcrLine(res.text(), lineBox, words);
     }
 
-    static OcrResult splice(OcrResult src, Map<Integer, OcrLine> replacements, Set<Integer> drop) {
+    /**
+     * {@code inserted} carries lines with no original OneOCR line to replace - coverage-gap
+     * bands - so the merged list is re-sorted top-to-bottom by bounding-box position rather
+     * than kept in OneOCR's original (now incomplete) line order.
+     */
+    static OcrResult splice(OcrResult src, Map<Integer, OcrLine> replacements, Set<Integer> drop, List<OcrLine> inserted) {
         var lines = new ArrayList<OcrLine>();
         var all = src.lines();
         for (var i = 0; i < all.size(); i++) {
             if (drop.contains(i)) continue;
             lines.add(replacements.getOrDefault(i, all.get(i)));
+        }
+        lines.addAll(inserted);
+        if (!inserted.isEmpty()) {
+            lines.sort(Comparator.comparingDouble(l -> l.boundingBox() == null ? Double.MAX_VALUE : l.boundingBox().y1()));
         }
         var text = new StringBuilder();
         for (var l : lines) {

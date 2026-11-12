@@ -1,6 +1,7 @@
 package oneocr.cli.pdf;
 
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.io.IOUtils;
 import org.apache.pdfbox.pdmodel.*;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
@@ -19,6 +20,8 @@ import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import oneocr.cli.*;
+import oneocr.cli.engine.EngineCliOptions;
+import oneocr.cli.engine.Engines;
 import oneocr.cli.improve.*;
 import oneocr.cli.layout.*;
 import static oneocr.cli.PagedOcrData.*;
@@ -82,12 +85,21 @@ public class PdfOcrCommand implements Callable<Integer> {
     private Integer userTargetDpi;
 
     @Mixin
+    private EngineCliOptions engineOptions = new EngineCliOptions();
+
+    @Mixin
     private TessCliOptions tess = new TessCliOptions();
 
     @Mixin
     private LayoutCliOptions layout = new LayoutCliOptions();
 
     private ImproveOptions improveOptions;
+
+    /**
+     * Which backend actually read this document, for the output metadata. Set when the engine is
+     * opened; until then the historical value, so a path that writes before opening one is unchanged.
+     */
+    private String engineName = OcrMetadata.ENGINE_ONEOCR;
     
     // PDF processing fields
     private int calculatedTargetDpi = 0;  // User-specified or calculated DPI for preview images
@@ -319,7 +331,7 @@ public class PdfOcrCommand implements Callable<Integer> {
      */
     private void runTesseractPass(ImproveOptions opts, List<PagedOcrResult> results,
                                   Path outputDir, LogFormatter log) {
-        try (var document = Loader.loadPDF(pdfFile);
+        try (var document = PdfOpen.open(pdfFile);
              var improver = new DocumentImprover(opts)) {
             var renderer = new PDFRenderer(document);
             log.step("TESS", "Second pass over low-confidence lines across " + results.size() + " page(s)");
@@ -347,7 +359,7 @@ public class PdfOcrCommand implements Callable<Integer> {
                 return;
             }
 
-            var engine = OcrMetadata.ENGINE_ONEOCR_TESSERACT;
+            var engine = OcrMetadata.improvedBy(engineName);
             var paged = new ArrayList<PagedOcrResult>();
             var replaced = 0;
             for (var i = 0; i < improved.size(); i++) {
@@ -370,7 +382,7 @@ public class PdfOcrCommand implements Callable<Integer> {
                 paged.stream().map(p -> "=== Page " + p.pageNumber() + " ===\n" + p.ocrResult().text())
                     .collect(java.util.stream.Collectors.joining("\n\n")));
             Files.writeString(outputDir.resolve(EngineNaming.improved(naming.combined("xhtml"))),
-                OcrToSemanticXHtml.combineMultipleResults(paged, pdfFile.getName()));
+                OcrToSemanticXHtml.combineMultipleResults(paged, pdfFile.getName(), OcrMetadata.improvedBy(engineName)));
 
             if (layout.enabled())
                 writeLayout(outputDir.resolve(EngineNaming.improved(naming.combined("xhtml"))),
@@ -387,7 +399,7 @@ public class PdfOcrCommand implements Callable<Integer> {
     private List<PagedOcrResult> processWithParallelArchitecture(Path outputDir, ProgressTracker progress, LogFormatter log) throws Exception {
         List<PagedOcrResult> results = new ArrayList<>();
         
-        try (PDDocument document = Loader.loadPDF(pdfFile)) {
+        try (PDDocument document = PdfOpen.open(pdfFile)) {
             PDFRenderer pdfRenderer = new PDFRenderer(document);
             int totalPages = document.getNumberOfPages();
             
@@ -400,8 +412,25 @@ public class PdfOcrCommand implements Callable<Integer> {
             // Initialize parallel processing
             ExecutorService webpExecutor = Executors.newSingleThreadExecutor();
             List<String> combinedTextLines = new ArrayList<>();
+            // The progressive merge below re-serialises every page seen so far, so doing it on
+            // every single page is O(n^2) in total work over a long document - fine at the small
+            // scale this was written for, but it is what drove a 101-page run to exhaust system
+            // memory (confirmed: the base OneOCR pass alone, unrelated to any Tesseract pass,
+            // degraded steadily and the JVM was still "Forcible GCing" through it). Throttling to
+            // every MERGE_EVERY_N_PAGES pages, plus always the last one, keeps the same final
+            // output with a bounded number of full re-serialisations instead of one per page.
+            final int MERGE_EVERY_N_PAGES = 10;
+            var lastMergedPage = 0;
 
-            try {
+            // One engine for the whole document. The previous code built a pipeline, options and
+            // engine handle inside the page loop and tore them down again, paying model load per
+            // page; on the ONNX backend that is several sessions per page.
+            try (var engine = Engines.open(engineOptions.engine, maxLines, engineOptions.onnxOptions())) {
+                engineName = engine.engineName();
+                log.debug("OCR", "engine: " + engineName);
+                if (engineOptions.ignoredByDll() && !(engine instanceof oneocr.cli.engine.OnnxEngine))
+                    log.debug("OCR", "the DLL backend decides orientation and script itself, so "
+                        + "--upright/--rotation/--lang/--lang-candidates do nothing. Use --engine ONNX.");
                 for (int page = 0; page < pdfInfo.pageCount(); page++) {
                     int pageNum = page + 1;
                     if (pageNum <= 3) { // Debug first few pages
@@ -431,22 +460,7 @@ public class PdfOcrCommand implements Callable<Integer> {
                     // Main Thread: OCR Processing
                     OcrResult ocrResult;
                     try {
-                        // Convert image to BGRA format for OCR API
-                        byte[] bgraData = OcrTool.convertToBGRA(image);
-                        
-                        // Initialize OCR API (will be moved outside loop later)
-                        try (var ocrApi = new OneOcrApi()) {
-                            var initOptions = ocrApi.createInitOptions();
-                            var pipeline = ocrApi.createPipeline(initOptions);
-                            var processOptions = ocrApi.createProcessOptions(maxLines);
-                            
-                            ocrResult = ocrApi.recognizeImage(pipeline, processOptions, 
-                                image.getWidth(), image.getHeight(), bgraData);
-                                
-                            processOptions.close();
-                            pipeline.close();
-                            initOptions.close();
-                        }
+                        ocrResult = engine.read(image);
                         combinedTextLines.add(ocrResult.text());
                     } catch (Exception e) {
                         progress.err(String.format("Page %d OCR failed: %s", pageNum, e.getMessage()));
@@ -496,7 +510,7 @@ public class PdfOcrCommand implements Callable<Integer> {
                         atomicWriteString(txtFile, ocrResult.text());
                         
                         String xhtmlContent = OcrToSemanticXHtml.toXHtml(
-                            ocrResult, imageName, image.getWidth(), image.getHeight());
+                            ocrResult, imageName, image.getWidth(), image.getHeight(), engineName);
                         
                         atomicWriteString(xhtmlFile, xhtmlContent);
                         
@@ -504,25 +518,30 @@ public class PdfOcrCommand implements Callable<Integer> {
                         System.err.printf("Failed to write OCR files for page %d: %s%n", pageNum, e.getMessage());
                     }
                     
-                    // Update merged files progressively
-                    try {
-                        Path mergedTxtPath = outputDir.resolve(naming.range(1, pageNum, "txt"));
-                        Path mergedXhtmlPath = outputDir.resolve(naming.range(1, pageNum, "xhtml"));
-                        
-                        String combinedText = String.join("\n", combinedTextLines);
-                        atomicWriteString(mergedTxtPath, combinedText);
-                        
-                        String combinedXhtml = OcrToSemanticXHtml.combineMultipleResults(results, pdfName);
-                        atomicWriteString(mergedXhtmlPath, combinedXhtml);
-                        
-                        // Clean up previous range file
-                        if (pageNum > 1) {
-                            Files.deleteIfExists(outputDir.resolve(naming.range(1, pageNum - 1, "txt")));
-                            Files.deleteIfExists(outputDir.resolve(naming.range(1, pageNum - 1, "xhtml")));
+                    // Update merged files, throttled (see MERGE_EVERY_N_PAGES above) rather than
+                    // on every page - this is a progress convenience for an interrupted run, not
+                    // something the final output depends on, since the last page always writes it.
+                    if (pageNum % MERGE_EVERY_N_PAGES == 0 || pageNum == totalPages) {
+                        try {
+                            Path mergedTxtPath = outputDir.resolve(naming.range(1, pageNum, "txt"));
+                            Path mergedXhtmlPath = outputDir.resolve(naming.range(1, pageNum, "xhtml"));
+
+                            String combinedText = String.join("\n", combinedTextLines);
+                            atomicWriteString(mergedTxtPath, combinedText);
+
+                            String combinedXhtml = OcrToSemanticXHtml.combineMultipleResults(results, pdfName, engineName);
+                            atomicWriteString(mergedXhtmlPath, combinedXhtml);
+
+                            // Clean up the previous range file actually written, not just pageNum-1.
+                            if (lastMergedPage > 0) {
+                                Files.deleteIfExists(outputDir.resolve(naming.range(1, lastMergedPage, "txt")));
+                                Files.deleteIfExists(outputDir.resolve(naming.range(1, lastMergedPage, "xhtml")));
+                            }
+                            lastMergedPage = pageNum;
+
+                        } catch (IOException e) {
+                            System.err.printf("Failed to update merged files for page %d: %s%n", pageNum, e.getMessage());
                         }
-                        
-                    } catch (IOException e) {
-                        System.err.printf("Failed to update merged files for page %d: %s%n", pageNum, e.getMessage());
                     }
                     
                     // Wait for WebP completion before proceeding
@@ -586,7 +605,8 @@ public class PdfOcrCommand implements Callable<Integer> {
             results.stream()
                 .map(PagedOcrResult::from)
                 .toList(),
-            pdfFile.getName()
+            pdfFile.getName(),
+            engineName
         );
         
         Files.writeString(outputFile, combinedXhtml);
@@ -739,7 +759,7 @@ public class PdfOcrCommand implements Callable<Integer> {
         }
         
         // Initialize PDF renderer (thread-safe for reading)
-        try (PDDocument document = Loader.loadPDF(pdfFile)) {
+        try (PDDocument document = PdfOpen.open(pdfFile)) {
             this.pdfRenderer = new PDFRenderer(document);
             
             // Thread-safe result collection
@@ -754,7 +774,20 @@ public class PdfOcrCommand implements Callable<Integer> {
             // CRITICAL FIX: OneOCR requires thread-local initialization!
             // Initialize OCR instances INSIDE worker threads, not in main thread.
             // (Confirmed by ThreadInitializationTest: main thread init → worker thread use = 0% success)
-        
+            //
+            // That finding is about the DLL. The ONNX backend reports itself thread safe and is
+            // verified so, so it is opened once here and shared; each worker asks and decides. This
+            // engine is opened either way, so the backend claim and any model-load failure surface
+            // once, on this thread, rather than N times inside worker threads.
+            final var sharedEngine = Engines.open(engineOptions.engine, maxLines, engineOptions.onnxOptions());
+            engineName = sharedEngine.engineName();
+            log.debug("OCR", "engine: " + engineName
+                    + (sharedEngine.threadSafe() ? ", shared across workers" : ", one per worker"));
+            if (engineOptions.ignoredByDll() && !(sharedEngine instanceof oneocr.cli.engine.OnnxEngine))
+                log.debug("OCR", "the DLL backend decides orientation and script itself, so "
+                    + "--upright/--rotation/--lang/--lang-candidates do nothing. Use --engine ONNX.");
+            try (sharedEngine) {
+
         // Create OCR worker threads
         ExecutorService ocrExecutor = Executors.newFixedThreadPool(getThreads());
         ExecutorService webpExecutor = Executors.newCachedThreadPool();
@@ -769,13 +802,15 @@ public class PdfOcrCommand implements Callable<Integer> {
                 System.err.printf("DEBUG MT-START: Worker %d starting, pageQueue.size()=%d%n", workerId, pageQueue.size());
                 String pdfName = pdfFile.getName();
                 
-                // Initialize OCR INSIDE worker thread (thread-local requirement)
-                try (var api = new OneOcrApi()) {
+                // The DLL's pipeline handle is thread-local, so a backend that says it is not thread
+                // safe gets one engine per worker. The ONNX backend is safe to share, and sharing it
+                // loads the models once instead of once per worker — and it already spreads each
+                // page's lines across the machine, so N engines would only oversubscribe it.
+                var own = sharedEngine.threadSafe() ? null
+                        : Engines.open(engineOptions.engine, maxLines, engineOptions.onnxOptions());
+                var engine = own != null ? own : sharedEngine;
+                try {
                     System.err.printf("DEBUG MT-OCR: Worker %d OCR initialized successfully%n", workerId);
-                    var initOptions = api.createInitOptions();
-                    var pipeline = api.createPipeline(initOptions);
-                    var processOptions = api.createProcessOptions(maxLines);
-                    
                     try {
                         // Process pages from the queue using thread-local OCR instance
                         System.err.printf("DEBUG MT-LOOP: Worker %d entering page processing loop%n", workerId);
@@ -805,10 +840,7 @@ public class PdfOcrCommand implements Callable<Integer> {
                                     image = pdfRenderer.renderImageWithDPI(page, calculatedTargetDpi, ImageType.RGB);
                                 }
                                 
-                                // OCR processing using thread-local instance (no cross-thread sharing)
-                                byte[] bgraData = OcrTool.convertToBGRA(image);
-                                OcrResult ocrResult = api.recognizeImage(pipeline, processOptions, 
-                                    image.getWidth(), image.getHeight(), bgraData);
+                                OcrResult ocrResult = engine.read(image);
                             
                             // Create PageImage with proper WebP path
                             String imageName = naming.page(pageNum, "webp");
@@ -860,11 +892,9 @@ public class PdfOcrCommand implements Callable<Integer> {
                     } catch (Exception e) {
                         log.error("OCR", "Worker " + workerId + " failed: " + e.getMessage());
                     } finally {
-                        // Cleanup OCR resources within worker thread  
+                        // Only close an engine this worker owns; the shared one outlives every worker.
                         try {
-                            processOptions.close();
-                            pipeline.close();
-                            initOptions.close();
+                            if (own != null) own.close();
                         } catch (Exception e) {
                             if (verbose) {
                                 System.err.printf("Failed to cleanup OCR resources in worker %d: %s%n", workerId, e.getMessage());
@@ -915,6 +945,7 @@ public class PdfOcrCommand implements Callable<Integer> {
         }
         
         return orderedResults;
+        } // End of try-with-resources for the shared engine
         } // End of try-with-resources for PDDocument
     }
 
@@ -937,7 +968,7 @@ public class PdfOcrCommand implements Callable<Integer> {
         
         String imageName = naming.page(pageNum, "webp");
         String xhtmlContent = OcrToSemanticXHtml.toXHtml(
-            ocrResult, imageName, image.getWidth(), image.getHeight());
+            ocrResult, imageName, image.getWidth(), image.getHeight(), engineName);
         
         atomicWriteString(xhtmlFile, xhtmlContent);
     }
@@ -982,7 +1013,7 @@ public class PdfOcrCommand implements Callable<Integer> {
             }
         }
         
-        String combinedXhtml = OcrToSemanticXHtml.combineMultipleResults(allPageResults, pdfName);
+        String combinedXhtml = OcrToSemanticXHtml.combineMultipleResults(allPageResults, pdfName, engineName);
         Path finalRangeXhtml = outputDir.resolve(naming.range(1, totalPages, "xhtml"));
         atomicWriteString(finalRangeXhtml, combinedXhtml);
     }

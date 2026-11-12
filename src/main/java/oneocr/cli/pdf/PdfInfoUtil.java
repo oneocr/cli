@@ -32,7 +32,7 @@ public class PdfInfoUtil {
      */
     public static PdfInfo getPdfInfo(File pdfFile) throws Exception {
         long fileSize = -1;
-        try (PDDocument document = Loader.loadPDF(pdfFile)) {
+        try (PDDocument document = PdfOpen.open(pdfFile)) {
             int pageCount = document.getNumberOfPages();
             fileSize = Files.size(pdfFile.toPath());
             if (pageCount == 0) {

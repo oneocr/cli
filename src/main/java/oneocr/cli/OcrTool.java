@@ -8,6 +8,8 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 import oneocr.api.*;
+import oneocr.cli.engine.EngineCliOptions;
+import oneocr.cli.engine.Engines;
 import oneocr.cli.improve.*;
 import oneocr.cli.layout.*;
 
@@ -27,7 +29,7 @@ import xyz.jphil.windows_console_set_unicode_output.WindowsConsoleSetUnicodeOutp
     mixinStandardHelpOptions = true, 
     version = "1.0",
     description = "Windows 11 OneOCR command-line tool - Extract text from images using Windows built-in OCR",
-    subcommands = {PdfOcrCommand.class, FolderOcrCommand.class, UiCommand.class, LayoutCommand.class}
+    subcommands = {PdfOcrCommand.class, FolderOcrCommand.class, UiCommand.class, LayoutCommand.class, UpdateCommand.class}
 )
 public class OcrTool implements Callable<Integer> {
 
@@ -66,6 +68,9 @@ public class OcrTool implements Callable<Integer> {
 
     @Option(names = {"--threads"}, description = "Number of OCR threads for parallel processing (default: 1)", defaultValue = "1")
     private int threads;
+
+    @CommandLine.Mixin
+    private EngineCliOptions engineOptions = new EngineCliOptions();
 
     @CommandLine.Mixin
     private TessCliOptions tess = new TessCliOptions();
@@ -159,23 +164,16 @@ public class OcrTool implements Callable<Integer> {
             log.debug("IMAGE", String.format("Loaded: %dx%d pixels", image.getWidth(), image.getHeight()));
             log.step("OCR", "Initializing engine");
             
-            byte[] bgraData = convertToBGRA(image);
-            
-            // Perform OCR
+            // Perform OCR, on whichever backend was asked for or the platform decided
             OcrResult result;
-            try (var ocrApi = new OneOcrApi()) {
-                log.step("OCR", "Running recognition");
-                
-                var initOptions = ocrApi.createInitOptions();
-                var pipeline = ocrApi.createPipeline(initOptions);
-                var processOptions = ocrApi.createProcessOptions(maxLines);
-                
-                result = ocrApi.recognizeImage(pipeline, processOptions, 
-                    image.getWidth(), image.getHeight(), bgraData);
-                    
-                processOptions.close();
-                pipeline.close();
-                initOptions.close();
+            String engineName;
+            try (var engine = Engines.open(engineOptions.engine, maxLines, engineOptions.onnxOptions())) {
+                engineName = engine.engineName();
+                log.step("OCR", "Running recognition on " + engineName);
+                if (engineOptions.ignoredByDll() && engine instanceof oneocr.cli.engine.DllEngine)
+                    log.debug("OCR", "the DLL backend decides orientation and script itself, so "
+                        + "--upright/--rotation/--lang/--lang-candidates do nothing here. Use --engine ONNX.");
+                result = engine.read(image);
             }
 
             progress.inc();
@@ -217,10 +215,10 @@ public class OcrTool implements Callable<Integer> {
                 outputPlainText(result, actualTextFile, log);
             }
             if (actualJsonFile != null) {
-                outputCompactJson(result, actualJsonFile, image.getWidth(), image.getHeight(), log);
+                outputCompactJson(result, actualJsonFile, image.getWidth(), image.getHeight(), engineName, log);
             }
             if (actualXhtmlFile != null) {
-                outputSemanticXhtml(result, actualXhtmlFile, image.getWidth(), image.getHeight(), log);
+                outputSemanticXhtml(result, actualXhtmlFile, image.getWidth(), image.getHeight(), engineName, log);
             }
             if (actualSvgFile != null) {
                 generateSvg(result, actualSvgFile, image.getWidth(), image.getHeight());
@@ -237,7 +235,7 @@ public class OcrTool implements Callable<Integer> {
             }
 
             if (improveOptions != null) {
-                runTesseractPass(improveOptions, result, image,
+                runTesseractPass(improveOptions, result, image, engineName,
                     actualTextFile, actualJsonFile, actualXhtmlFile, actualSvgFile, log);
             }
 
@@ -271,7 +269,7 @@ public class OcrTool implements Callable<Integer> {
      * Optional second pass. The original OneOCR outputs stay exactly as written; a parallel
      * *.oneocr+tesseract.* set is produced so both readings are on disk for the record.
      */
-    private void runTesseractPass(ImproveOptions opts, OcrResult result, BufferedImage image, File txt, File json,
+    private void runTesseractPass(ImproveOptions opts, OcrResult result, BufferedImage image, String engineName, File txt, File json,
                                   File xhtml, File svg, LogFormatter log) {
         try (var improver = new DocumentImprover(opts)) {
             log.step("TESS", "Second pass over low-confidence lines");
@@ -284,7 +282,7 @@ public class OcrTool implements Callable<Integer> {
                 log.success("TESS", "Nothing replaced; no second output written");
                 return;
             }
-            var engine = OcrMetadata.ENGINE_ONEOCR_TESSERACT;
+            var engine = OcrMetadata.improvedBy(engineName);
             var name = inputFile.toPath().getFileName().toString();
             var w = image.getWidth();
             var h = image.getHeight();
@@ -361,15 +359,15 @@ public class OcrTool implements Callable<Integer> {
         System.out.print(output);
     }
 
-    private void outputCompactJson(OcrResult result, File compactJsonFile, int imageWidth, int imageHeight, LogFormatter log) throws Exception {
-        var compactJson = CompactJsonSerializer.toCompactJson(result, inputFile.toPath().getFileName().toString(), imageWidth, imageHeight);
+    private void outputCompactJson(OcrResult result, File compactJsonFile, int imageWidth, int imageHeight, String engine, LogFormatter log) throws Exception {
+        var compactJson = CompactJsonSerializer.toCompactJson(result, inputFile.toPath().getFileName().toString(), imageWidth, imageHeight, engine);
         Files.writeString(compactJsonFile.toPath(), compactJson);
         
         log.success("OUTPUT", String.format("JSON: %s (%d bytes)", compactJsonFile.getName(), compactJson.length()));
     }
 
-    private void outputSemanticXhtml(OcrResult result, File xhtmlFile, int imageWidth, int imageHeight, LogFormatter log) throws Exception {
-        String xhtml = OcrToSemanticXHtml.toXHtml(result, inputFile.toPath().getFileName().toString(), imageWidth, imageHeight);
+    private void outputSemanticXhtml(OcrResult result, File xhtmlFile, int imageWidth, int imageHeight, String engine, LogFormatter log) throws Exception {
+        String xhtml = OcrToSemanticXHtml.toXHtml(result, inputFile.toPath().getFileName().toString(), imageWidth, imageHeight, engine);
         Files.writeString(xhtmlFile.toPath(), xhtml);
         
         log.success("OUTPUT", String.format("XHTML: %s (%d bytes)", xhtmlFile.getName(), xhtml.length()));

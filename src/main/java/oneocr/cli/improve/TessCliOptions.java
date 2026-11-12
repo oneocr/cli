@@ -55,8 +55,22 @@ public class TessCliOptions {
         description = "Lines whose mean word confidence is below this are re-read (default: ${DEFAULT-VALUE}).")
     public double tessMinConfidence;
 
+    @Option(names = {"--detect-coverage-gaps"},
+        description = "Also look for page regions with ink but no OneOCR line at all - a DETECTION gap "
+            + "(e.g. a script OneOCR does not recognise, like Kannada) that the confidence guard above "
+            + "cannot see, since it only ever inspects lines OneOCR already emitted. Off by default; when "
+            + "on, needs --tess-candidates or --tess-lang exactly as the confidence guard does.")
+    public boolean detectCoverageGaps;
+
+    @Option(names = {"--gap-content-margin"}, defaultValue = "0,0,0,0",
+        description = "Fractions of page width/height to exclude from coverage-gap scanning, as "
+            + "top,bottom,left,right (e.g. a decorative page border: 0.06,0.06,0.08,0.08). Calibrated per "
+            + "book template, not auto-detected. Default: ${DEFAULT-VALUE} (whole page). Only used with "
+            + "--detect-coverage-gaps.")
+    public String gapContentMargin;
+
     public boolean enabled() {
-        return tesseract || tessLang != null || tessCandidates != null || tessAll;
+        return tesseract || tessLang != null || tessCandidates != null || tessAll || detectCoverageGaps;
     }
 
     /** Fails loudly rather than guessing a script set the caller never asked for. */
@@ -69,6 +83,8 @@ public class TessCliOptions {
         o.maxProbeSamples = tessSamples;
         o.minLineConfidence = tessMinConfidence;
         o.candidates = TessLangs.resolve(tessCandidates, o.baseLang);
+        o.detectCoverageGaps = detectCoverageGaps;
+        o.contentMargin = parseMargin(gapContentMargin);
 
         if (o.forcedLang == null && o.candidates.isEmpty()) {
             throw new ParameterException(spec.commandLine(),
@@ -81,5 +97,22 @@ public class TessCliOptions {
                 "--tess-all needs --tess-candidates to know what 'all' means.");
         }
         return o;
+    }
+
+    ImproveOptions.ContentMargin parseMargin(String spec) {
+        if (spec == null || spec.isBlank()) return ImproveOptions.ContentMargin.NONE;
+        var parts = spec.split(",");
+        if (parts.length != 4) {
+            throw new ParameterException(this.spec.commandLine(),
+                "--gap-content-margin needs exactly 4 comma separated fractions: top,bottom,left,right (got '" + spec + "')");
+        }
+        try {
+            return new ImproveOptions.ContentMargin(
+                Double.parseDouble(parts[0].trim()), Double.parseDouble(parts[1].trim()),
+                Double.parseDouble(parts[2].trim()), Double.parseDouble(parts[3].trim()));
+        } catch (NumberFormatException e) {
+            throw new ParameterException(this.spec.commandLine(),
+                "--gap-content-margin values must be numbers (got '" + spec + "')");
+        }
     }
 }

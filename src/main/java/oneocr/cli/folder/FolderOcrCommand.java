@@ -16,6 +16,9 @@ import oneocr.cli.OcrTool;
 import oneocr.cli.ProgressTracker;
 import oneocr.cli.ProgressAwareLogFormatter;
 import oneocr.cli.folder.FileProcessor.FileType;
+import oneocr.cli.engine.EngineCliOptions;
+import oneocr.cli.engine.Engines;
+import oneocr.cli.engine.OcrEngine;
 import oneocr.cli.layout.LayoutCliOptions;
 import oneocr.cli.layout.LayoutExport;
 import oneocr.cli.layout.PageLayout;
@@ -36,6 +39,12 @@ public class FolderOcrCommand implements Callable<Integer> {
 
     @picocli.CommandLine.Mixin
     private LayoutCliOptions layout = new LayoutCliOptions();
+
+    @picocli.CommandLine.Mixin
+    private EngineCliOptions engineOptions = new EngineCliOptions();
+
+    /** Opened on the first image and held for the whole folder run; see {@link #engine()}. */
+    private OcrEngine engine;
 
 
     @Parameters(
@@ -229,16 +238,35 @@ public class FolderOcrCommand implements Callable<Integer> {
             }
         }
         
+        closeEngine();
+
         // Complete progress and show summary
         progress.done();
         System.out.printf("📊 Processing complete: %d success, %d errors%n", successCount, errorCount);
-        
+
         // Disable folder mode to clean up
         DualProgressRenderer.disableFolderMode();
-        
+
         return errorCount > 0 ? 1 : 0;
     }
     
+    /**
+     * The backend for this folder run, opened on first use and closed when the run ends. Images go
+     * through it directly; a PDF in the folder is handed to {@link PdfOcrCommand}, which opens its
+     * own — the same backend, since {@code Engines} refuses to mix them in one process.
+     */
+    private synchronized OcrEngine engine() throws Exception {
+        if (engine == null) engine = Engines.open(engineOptions.engine, maxLines, engineOptions.onnxOptions());
+        return engine;
+    }
+
+    private void closeEngine() {
+        synchronized (this) {
+            if (engine != null) engine.close();
+            engine = null;
+        }
+    }
+
     private boolean processImageFile(Path file, Path outputPath, ProgressAwareLogFormatter log) throws Exception {
         log.step("IMAGE", "Processing " + file.getFileName());
         
@@ -250,22 +278,9 @@ public class FolderOcrCommand implements Callable<Integer> {
                 return false;
             }
             
-            byte[] bgraData = OcrTool.convertToBGRA(image);
-            
-            // Perform OCR
-            OcrResult result;
-            try (var ocrApi = new OneOcrApi()) {
-                var initOptions = ocrApi.createInitOptions();
-                var pipeline = ocrApi.createPipeline(initOptions);
-                var processOptions = ocrApi.createProcessOptions(maxLines);
-                
-                result = ocrApi.recognizeImage(pipeline, processOptions, 
-                    image.getWidth(), image.getHeight(), bgraData);
-                    
-                processOptions.close();
-                pipeline.close();
-                initOptions.close();
-            }
+            // One engine for the whole folder, opened on the first image. Building one per file paid
+            // the model load again for every file in the folder.
+            OcrResult result = engine().read(image);
             
             // Generate outputs preserving relative path structure  
             var textFile = createOutputPath(file, outputPath, ".oneocr.txt");
@@ -359,6 +374,11 @@ public class FolderOcrCommand implements Callable<Integer> {
                 pdfArgsList.add(layout.mode().name().toLowerCase());
                 if (layout.noLayoutHtml) pdfArgsList.add("--no-layout-html");
             }
+
+            // The backend and its options have to travel with the PDF. Without this the sub-command
+            // defaults to AUTO, and a folder run on --engine ONNX has already loaded that native, so
+            // Engines refuses the DLL and every PDF in the folder fails.
+            pdfArgsList.addAll(engineOptions.asArgs());
 
             // Note: --threads is a global parameter handled by the parent command,
             // not passed directly to PDF subcommand. The PdfOcrCommand will get

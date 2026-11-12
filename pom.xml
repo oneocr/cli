@@ -6,7 +6,7 @@
 
     <groupId>io.github.oneocr</groupId>
     <artifactId>oneocr-cli</artifactId>
-    <version>2.0</version>
+    <version>2.0.1</version>
 
     <properties>
         <maven.compiler.source>22</maven.compiler.source>
@@ -22,6 +22,16 @@
             <version>2.0</version>
         </dependency>
         
+        <!-- The same OneOCR models over ONNX Runtime, with no oneocr.dll. This is what makes every
+             output format in this tool available on Linux (PRP 04, wired up in PRP 26). Its native
+             and oneocr-api's must never both be loaded into one JVM; oneocr.cli.engine.Engines
+             enforces that, which is why nothing else here may open a backend. -->
+        <dependency>
+            <groupId>io.github.oneocr</groupId>
+            <artifactId>oneocr-onnx</artifactId>
+            <version>2.0</version>
+        </dependency>
+
         <!-- Optional Tesseract second pass for Indic scripts OneOCR cannot read -->
         <dependency>
             <groupId>io.github.oneocr</groupId>
@@ -34,6 +44,13 @@
             <groupId>info.picocli</groupId>
             <artifactId>picocli</artifactId>
             <version>4.7.5</version>
+        </dependency>
+
+        <!-- `1ocr update`: asks jr to swap this exe for the newest release (PRP 28). No dependencies of its own. -->
+        <dependency>
+            <groupId>io.github.jarrunner</groupId>
+            <artifactId>jr-apputils</artifactId>
+            <version>1.1</version>
         </dependency>
         
         <!-- org.json for simple JSON handling -->
@@ -178,4 +195,107 @@
             </plugin>
         </plugins>
     </build>
+
+    <!-- The cmdtools launcher(s), built by jr-maven-plugin with the config baked in (replaces the .jrc):
+         mvn -Djrexe -Djr.installDir=<folder on PATH> package -->
+    <profiles>
+        <!-- A jar built for a release (-Djr.source=url) never carries Microsoft's oneocr.dll, model, onnxruntime.dll or
+             OpenCV: they cannot be redistributed (CLAUDE.md), and the release jar is downloaded from a public page. The
+             machine supplies them in ~/oneocr; oneocr.api.LoadNativeLib says where they come from when they are missing.
+             The release jar is written under its own name, so the live dev jar that the installed exe names is not touched. -->
+        <profile>
+            <id>release-without-natives</id>
+            <activation>
+                <property>
+                    <name>jr.source</name>
+                    <value>url</value>
+                </property>
+            </activation>
+            <build>
+                <finalName>1ocr-${project.version}-release</finalName>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-shade-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <phase>package</phase>
+                                <goals><goal>shade</goal></goals>
+                                <configuration>
+                                    <filters>
+                                        <filter>
+                                            <artifact>io.github.oneocr:oneocr-api</artifact>
+                                            <excludes>
+                                                <exclude>natives/**</exclude>
+                                            </excludes>
+                                        </filter>
+                                        <!-- The ONNX Runtime jar bundles a 357 MB onnxruntime.pdb (debug symbols) and the macOS and Linux
+                                             natives; the release exe is Windows only, so none of it is needed (jar 152 MB -> a fraction). -->
+                                        <filter>
+                                            <artifact>*:*</artifact>
+                                            <excludes>
+                                                <exclude>**/*.pdb</exclude>
+                                                <exclude>ai/onnxruntime/native/osx-*/**</exclude>
+                                                <exclude>ai/onnxruntime/native/linux-*/**</exclude>
+                                            </excludes>
+                                        </filter>
+                                    </filters>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>jrexe</id>
+            <activation>
+                <property>
+                    <name>jrexe</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.github.jarrunner</groupId>
+                        <artifactId>jr-maven-plugin</artifactId>
+                        <version>1.6.0</version>
+                        <executions>
+                            <execution>
+                                <id>1ocr</id>
+                                <goals><goal>exe</goal></goals>
+                                <configuration>
+                                    <name>1ocr</name>
+                                    <jar>${project.build.directory}/${project.build.finalName}.jar</jar>
+                                    <!-- Where a RELEASE exe (mvn -Djrexe -Djr.source=url package) finds its jar, and where `1ocr update`
+                                         looks for the next version. Publishing is a manual step, see prp/28-prp.status.md. -->
+                                    <jarUrl>https://github.com/oneocr/cli/releases/download/v${project.version}/1ocr-${project.version}.jar</jarUrl>
+                                    <updateUrl>https://github.com/oneocr/cli/releases/latest/download/1ocr.update.json</updateUrl>
+                                    <jvmMode>dll</jvmMode>
+                                    <aot>true</aot>
+                                    <!-- PRP 28: named collector and a heap cap (before: plain G1, 4 GB cap, no flags).
+                                         Tuned G1 won by measurement: at a 1 GB cap it holds ~460 MB average like it does at 256 MB,
+                                         while Serial drifts up to the cap (918 MB average at 1 GB). The cap stays high so one very
+                                         large scanned page still fits. -->
+                                    <vmArgs>
+                                        <vmArg>--enable-native-access=ALL-UNNAMED</vmArg>
+                                        <vmArg>-XX:+UseG1GC</vmArg>
+                                        <vmArg>-XX:ParallelGCThreads=2</vmArg>
+                                        <vmArg>-XX:ConcGCThreads=1</vmArg>
+                                        <vmArg>-XX:MarkStackSize=64K</vmArg>
+                                        <vmArg>-Xms16m</vmArg>
+                                        <vmArg>-Xmx1g</vmArg>
+                                        <vmArg>-Xss512k</vmArg>
+                                        <vmArg>-XX:MinHeapFreeRatio=10</vmArg>
+                                        <vmArg>-XX:MaxHeapFreeRatio=30</vmArg>
+                                        <vmArg>-XX:SoftRefLRUPolicyMSPerMB=0</vmArg>
+                                    </vmArgs>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
